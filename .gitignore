@@ -1,0 +1,52 @@
+# ==============================================================================
+# Git Ignore Configuration: kv_continuity (Speculative Decoding & KV Continuity)
+# ==============================================================================
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Large base model weights (do NOT push huge foundation model weights > 100MB)
+*.safetensors
+*.bin
+*.ckpt
+*.onnx
+base_model.pt
+
+# Allow exit adapter checkpoints (<15MB) while ignoring large weights
+checkpoints/
+*.pt
+
+# Training logs & tracking
+runs/
+wandb/
+tensorboard/
+*.log
+
+# Documentation & Paper writeups
+doc/
+docs/
+paper_table_*.md
+
+# Results & Data outputs
+results/
+*.json
+*.csv
