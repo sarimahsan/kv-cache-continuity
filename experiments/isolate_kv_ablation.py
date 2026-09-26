@@ -47,7 +47,10 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from src.kv_cache import StaticKVCache
-from src.model import ModelConfig, TransformerLM
+try:
+    from src.model import ModelConfig, TransformerLM
+except ImportError:
+    ModelConfig, TransformerLM = None, None
 from src.exit_adapter import ExitCalibrationModule
 
 
