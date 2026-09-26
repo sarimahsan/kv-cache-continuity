@@ -52,7 +52,7 @@ def parse_args():
     parser.add_argument("--steps", type=int, default=300, help="Training steps per rank")
     parser.add_argument("--batch-size", type=int, default=2, help="Training batch size")
     parser.add_argument("--seq-len", type=int, default=64, help="Tokens evaluated per sequence")
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate (default: 2e-4 for stable fp32/fp16 training)")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument(
         "--output-dir",
@@ -139,7 +139,7 @@ def main():
             candidate_depths=[d_target],
             adapter_type="mlp",
             rank=rank
-        ).to(device=device, dtype=model_dtype)
+        ).to(device=device, dtype=torch.float32)
 
         trainable_params = sum(p.numel() for p in adapter.parameters() if p.requires_grad)
         print(f"  -> Rank: {rank:<5} | Trainable Params: {trainable_params:,} ({trainable_params / 1e6:.2f}M)")
@@ -158,24 +158,28 @@ def main():
             with torch.no_grad():
                 out = engine.model(input_ids=x_b, output_hidden_states=True, return_dict=True)
                 h_exit = out.hidden_states[d_target]
-                teacher_logits = out.logits
+                teacher_logits = out.logits.float()
 
-            calibrated_h = adapter.forward_layer(h_exit, depth=d_target)
+            calibrated_h = adapter.forward_layer(h_exit.float(), depth=d_target).to(engine.dtype)
             norm_cal = engine.model.model.norm(calibrated_h)
-            logits = engine.model.lm_head(norm_cal)
+            logits = engine.model.lm_head(norm_cal).float()
 
-            loss_ce = F.cross_entropy(logits.reshape(-1, logits.size(-1)).float(), y_b.reshape(-1))
-            p_teacher = F.softmax((teacher_logits / 2.0).float(), dim=-1)
-            log_p_student = F.log_softmax((logits / 2.0).float(), dim=-1)
+            loss_ce = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y_b.reshape(-1))
+            p_teacher = F.softmax(teacher_logits / 2.0, dim=-1)
+            log_p_student = F.log_softmax(logits / 2.0, dim=-1)
             loss_kd = F.kl_div(log_p_student, p_teacher, reduction="batchmean") * 4.0
 
             loss = 0.5 * loss_ce + 0.5 * loss_kd
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"  [!] Warning: NaN/Inf detected at step {step}! Skipping step.")
+                continue
+
             loss.backward()
             nn.utils.clip_grad_norm_(adapter.parameters(), 1.0)
             optimizer.step()
 
             final_loss = loss.item()
-            if step % 100 == 0 or step == args.steps:
+            if step % 50 == 0 or step == args.steps:
                 print(f"  [Step {step:3d}/{args.steps}] Loss: {final_loss:.4f} (CE: {loss_ce.item():.4f}, KD: {loss_kd.item():.4f})")
 
         train_time = time.perf_counter() - t0
