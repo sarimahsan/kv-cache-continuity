@@ -100,8 +100,8 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Teacher-Forced KV-Only Ablation: Disentangling KV Approximation from Exit Head Readout"
     )
-    parser.add_argument("--model-type", type=str, choices=["125m", "qwen"], default="125m", help="Model family")
-    parser.add_argument("--model-id", type=str, default="Qwen/Qwen2.5-3B", help="Hugging Face repo for Qwen")
+    parser.add_argument("--model-type", type=str, choices=["125m", "qwen", "llama"], default="125m", help="Model family")
+    parser.add_argument("--model-id", type=str, default=None, help="Hugging Face repo (defaults: Qwen/Qwen2.5-3B for qwen, meta-llama/Llama-3.2-1B for llama)")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to base_model.pt checkpoint")
     parser.add_argument(
         "--depth-schedule",
@@ -477,28 +477,40 @@ def main():
     print(f"Model Type: {args.model_type} | Device: {device} | Schedule: {args.depth_schedule}")
     print("=" * 80)
 
+    if args.model_id is None:
+        if args.model_type == "llama":
+            args.model_id = "meta-llama/Llama-3.2-1B"
+        elif args.model_type == "qwen":
+            args.model_id = "Qwen/Qwen2.5-3B"
+
     # Determine exit depths to test
-    if args.depth_schedule == "skipdecode":
-        # Exactly 50% depth: L=6 for 125M (12 layers), L=18 for Qwen (36 layers)
-        default_depth = 6 if args.model_type == "125m" else 18
-        eval_depths = [args.exit_depth if args.exit_depth is not None else default_depth]
-    elif args.depth_schedule == "fixed":
-        default_depth = 6 if args.model_type == "125m" else 18
+    if args.depth_schedule in ("skipdecode", "fixed"):
+        if args.model_type == "125m":
+            default_depth = 6
+        elif args.model_type == "llama":
+            default_depth = 8 if "1B" in str(args.model_id) else 14
+        else:
+            default_depth = 18
         eval_depths = [args.exit_depth if args.exit_depth is not None else default_depth]
     else: # sweep
         if args.depths is not None:
             eval_depths = [int(x.strip()) for x in args.depths.split(",") if x.strip()]
         else:
-            eval_depths = [4, 6, 8, 10] if args.model_type == "125m" else [18, 24, 29, 32]
+            if args.model_type == "125m":
+                eval_depths = [4, 6, 8, 10]
+            elif args.model_type == "llama":
+                eval_depths = [4, 6, 8, 10, 11, 12, 13, 14] if "1B" in str(args.model_id) else [10, 14, 18, 20, 22, 24]
+            else:
+                eval_depths = [18, 24, 29, 32]
 
     # Initialize model
     tokenizer = None
     engine = None
     model_125m = None
 
-    if args.model_type == "qwen":
+    if args.model_type in ("qwen", "llama"):
         from src.qwen_dynamic import QwenDynamicEngine
-        print(f"[*] Initializing QwenDynamicEngine '{args.model_id}'...")
+        print(f"[*] Initializing CausalEngine for {args.model_type} '{args.model_id}'...")
         engine = QwenDynamicEngine(
             model_id=args.model_id,
             device=args.device,
@@ -583,7 +595,7 @@ def main():
 
         for s_idx, seq in enumerate(eval_seqs):
             print(f"  -> Evaluating sequence {s_idx + 1}/{len(eval_seqs)} (len={seq.size(1)})...", end="\r")
-            if args.model_type == "qwen":
+            if args.model_type in ("qwen", "llama"):
                 cond_res, cossim_res = evaluate_qwen_sequence(engine, seq, depth, device, adapter=calibration_adapter)
             else:
                 cond_res, cossim_res = evaluate_125m_sequence(model_125m, seq, depth, device, adapter=calibration_adapter)
