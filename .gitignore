@@ -50,3 +50,8 @@ paper_table_*.md
 results/
 *.json
 *.csv
+
+
+
+/manuscript/
+t.md
