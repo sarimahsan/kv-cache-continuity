@@ -108,7 +108,10 @@ def create_batch_stream(
             if dataset_name == "tinystories":
                 ds = hf_load_dataset("roneneldan/TinyStories", split="train", streaming=True)
             else:
-                ds = hf_load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+                try:
+                    ds = hf_load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
+                except Exception:
+                    ds = hf_load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
 
             buffer = []
             for item in ds:

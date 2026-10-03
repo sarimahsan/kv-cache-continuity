@@ -178,7 +178,10 @@ def prepare_eval_sequences(
             if dataset_name == "tinystories":
                 ds = hf_load_dataset("roneneldan/TinyStories", split="validation", streaming=True)
             else:
-                ds = hf_load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+                try:
+                    ds = hf_load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="validation")
+                except Exception:
+                    ds = hf_load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
 
             for item in ds:
                 text = item.get("text", "")

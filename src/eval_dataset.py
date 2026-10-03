@@ -20,24 +20,46 @@ def load_raw_wikitext2_split(split: str = "validation") -> str:
     Loads raw text for WikiText-2 from Hugging Face datasets with robust error handling.
     split: 'train', 'validation', or 'test'.
     """
+    # 1. Try Hugging Face datasets with canonical namespace 'Salesforce/wikitext'
     try:
         from datasets import load_dataset
-        ds = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
-        texts = [item["text"] for item in ds if len(item["text"].strip()) > 0]
-        full_text = "\n\n".join(texts)
-        return full_text
+        for repo_id in ["Salesforce/wikitext", "wikitext"]:
+            try:
+                ds = load_dataset(repo_id, "wikitext-2-raw-v1", split=split)
+                texts = [item["text"] for item in ds if len(item["text"].strip()) > 0]
+                full_text = "\n\n".join(texts)
+                if len(full_text) > 1000:
+                    return full_text
+            except Exception:
+                continue
     except Exception as e:
-        print(f"[!] Warning: Failed to load WikiText-2 ({split}) via Hugging Face ({e}).")
-        # Check if local fallback text exists
-        os.makedirs(WIKITEXT2_CACHE_DIR, exist_ok=True)
-        local_txt = os.path.join(WIKITEXT2_CACHE_DIR, f"wikitext2_{split}.txt")
-        if os.path.exists(local_txt):
-            print(f"[*] Reading cached local text file: {local_txt}")
-            with open(local_txt, "r", encoding="utf-8") as f:
-                return f.read()
-        raise RuntimeError(
-            f"Cannot load WikiText-2 split '{split}'. Please ensure internet access or provide {local_txt}."
-        )
+        print(f"[!] Warning: HF datasets loading failed: {e}")
+
+    # 2. Try direct parquet download via pandas if datasets failed
+    try:
+        import pandas as pd
+        split_name = "validation" if split == "validation" else ("train" if split == "train" else "test")
+        parquet_url = f"https://huggingface.co/datasets/Salesforce/wikitext/resolve/main/wikitext-2-raw-v1/{split_name}-00000-of-00001.parquet"
+        print(f"[*] Attempting direct parquet download from {parquet_url}...")
+        df = pd.read_parquet(parquet_url)
+        texts = [t for t in df["text"].tolist() if isinstance(t, str) and len(t.strip()) > 0]
+        full_text = "\n\n".join(texts)
+        if len(full_text) > 1000:
+            return full_text
+    except Exception as e:
+        print(f"[!] Parquet fallback failed: {e}")
+
+    # 3. Check if local fallback text exists
+    os.makedirs(WIKITEXT2_CACHE_DIR, exist_ok=True)
+    local_txt = os.path.join(WIKITEXT2_CACHE_DIR, f"wikitext2_{split}.txt")
+    if os.path.exists(local_txt):
+        print(f"[*] Reading cached local text file: {local_txt}")
+        with open(local_txt, "r", encoding="utf-8") as f:
+            return f.read()
+
+    raise RuntimeError(
+        f"Cannot load WikiText-2 split '{split}'. Please ensure internet access or provide {local_txt}."
+    )
 
 
 def get_tokenized_wikitext2(

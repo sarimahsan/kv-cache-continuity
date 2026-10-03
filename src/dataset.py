@@ -97,7 +97,10 @@ def load_dataset(
 
         elif dataset_name.lower() == "wikitext2":
             from datasets import load_dataset as hf_load_dataset
-            raw_ds = hf_load_dataset("wikitext", "wikitext-2-raw-v1")
+            try:
+                raw_ds = hf_load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1")
+            except Exception:
+                raw_ds = hf_load_dataset("wikitext", "wikitext-2-raw-v1")
             train_text = "\n\n".join(raw_ds["train"]["text"])
             val_text = "\n\n".join(raw_ds["validation"]["text"])
             tokens_train = encode_fn(train_text)
