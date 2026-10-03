@@ -84,14 +84,14 @@ def evaluate_condition_on_sequences(
     for seq in sequences:
         # seq shape: (1, T)
         T = seq.size(1)
-        kv_cache = engine.create_static_kv_buffer(batch_size=1, max_seq_len=T)
+        kv_cache = engine.init_static_kv_cache(batch_size=1, max_seq_len=T)
 
         for pos in range(T - 1):
             curr_tok = seq[:, pos : pos + 1]
             target_tok = seq[:, pos + 1]
 
             # 1. Compute condition forward pass
-            cond_logits, stats = engine.forward_step(
+            cond_logits, stats = engine.step_forward_decoupled(
                 input_id=curr_tok,
                 pos=pos,
                 kv_cache=kv_cache,
@@ -172,10 +172,10 @@ def run_oracle_and_dtype_diagnostic(
     # Diagnostic on L=18 Zero-Shot Readout
     print(f"\n[*] Diagnosing intermediate zero-shot readout at L={exit_depth}...")
     sample_seq = eval_seqs[0]
-    kv_cache = engine.create_static_kv_buffer(batch_size=1, max_seq_len=sample_seq.size(1))
+    kv_cache = engine.init_static_kv_cache(batch_size=1, max_seq_len=sample_seq.size(1))
     
     with torch.no_grad():
-        logits_exit, _ = engine.forward_step(
+        logits_exit, _ = engine.step_forward_decoupled(
             input_id=sample_seq[:, :1],
             pos=0,
             kv_cache=kv_cache,

@@ -269,3 +269,8 @@ class QwenDynamicEngine:
         logits = self.model.lm_head(norm_readout)
 
         return logits, stats
+
+    # Convenient method aliases for evaluation runners
+    create_static_kv_buffer = init_static_kv_cache
+    forward_step = step_forward_decoupled
+
