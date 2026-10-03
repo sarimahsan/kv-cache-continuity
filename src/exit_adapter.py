@@ -118,12 +118,15 @@ class ExitCalibrationModule(nn.Module):
         d_model: int,
         candidate_depths: List[int],
         adapter_type: str = "linear",
-        rank: int = 128
+        rank: int = 128,
+        bottleneck_dim: Optional[int] = None,
     ):
         super().__init__()
         self.d_model = d_model
         self.candidate_depths = sorted(candidate_depths)
         self.adapter_type = adapter_type
+        if bottleneck_dim is not None:
+            rank = bottleneck_dim
         self.rank = rank
 
         self.adapters = nn.ModuleDict({

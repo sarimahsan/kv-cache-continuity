@@ -46,10 +46,17 @@ class QwenDynamicEngine:
         self,
         model_id: str = "Qwen/Qwen2.5-3B",
         device: str = "cuda",
-        dtype: torch.dtype = torch.float16,
+        dtype: Optional[torch.dtype] = None,
         candidate_layers: Optional[List[int]] = None,
     ):
         self.device = torch.device(device)
+        if dtype is None:
+            if self.device.type == "cuda" and torch.cuda.is_bf16_supported():
+                dtype = torch.bfloat16
+            elif self.device.type == "cuda":
+                dtype = torch.float16
+            else:
+                dtype = torch.float32
         self.dtype = dtype
         self.candidate_layers = candidate_layers
 
@@ -181,6 +188,22 @@ class QwenDynamicEngine:
                         rel_k = (torch.norm(true_k.float() - k_proj.float()) / (torch.norm(true_k.float()) + 1e-8)).item()
                         rel_v = (torch.norm(true_v.float() - v_proj.float()) / (torch.norm(true_v.float()) + 1e-8)).item()
                         stats[l] = {"cos_k": cos_k, "cos_v": cos_v, "rel_k": rel_k, "rel_v": rel_v}
+
+                elif strategy == "oracle_k_proj_v":
+                    # Experiment C: Oracle K + Projected V
+                    norm_exit = layer.input_layernorm(h_exit)
+                    v_proj = attn.v_proj(norm_exit).view(B, 1, self.num_kv_heads, self.head_dim).transpose(1, 2)
+                    kv_cache["k"][l][:, :, pos : pos + 1, :] = k
+                    kv_cache["v"][l][:, :, pos : pos + 1, :] = v_proj
+
+                elif strategy == "proj_k_oracle_v":
+                    # Experiment C: Projected K + Oracle V
+                    norm_exit = layer.input_layernorm(h_exit)
+                    k_proj = attn.k_proj(norm_exit).view(B, 1, self.num_kv_heads, self.head_dim).transpose(1, 2)
+                    if cos is not None and sin is not None:
+                        k_proj = apply_rotary_pos_emb_single(k_proj, cos, sin)
+                    kv_cache["k"][l][:, :, pos : pos + 1, :] = k_proj
+                    kv_cache["v"][l][:, :, pos : pos + 1, :] = v
 
                 elif strategy == "direct_copy":
                     src_k = kv_cache["k"][exit_depth - 1][:, :, pos : pos + 1, :].clone()
