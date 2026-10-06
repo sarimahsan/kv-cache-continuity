@@ -48,6 +48,7 @@ class QwenDynamicEngine:
         device: str = "cuda",
         dtype: Optional[torch.dtype] = None,
         candidate_layers: Optional[List[int]] = None,
+        **kwargs,
     ):
         self.device = torch.device(device)
         if dtype is None:

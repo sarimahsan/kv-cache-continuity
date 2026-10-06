@@ -479,7 +479,6 @@ def main():
         model_id=args.model_id,
         device=args.device,
         dtype=dtype if device.type == "cuda" else torch.float32,
-        use_cache=True
     )
 
     # 2. Load Evaluation Token Stream
