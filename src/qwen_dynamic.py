@@ -141,6 +141,9 @@ class QwenDynamicEngine:
         """
         B = input_id.shape[0]
         h = self.model.model.embed_tokens(input_id)
+        model_type = getattr(self.config, "model_type", "qwen2")
+        if model_type in ["gemma", "gemma2"]:
+            h = h * (self.config.hidden_size ** 0.5)
 
         stats = {} if track_cossim else None
         h_exit = None
@@ -229,9 +232,24 @@ class QwenDynamicEngine:
                 v_hist = v_hist.repeat_interleave(n_rep, dim=1)
 
             attn_out = F.scaled_dot_product_attention(q, k_hist, v_hist, is_causal=False)
-            attn_out = attn_out.transpose(1, 2).contiguous().view(B, 1, self.hidden_size)
-            h = residual + attn.o_proj(attn_out)
-            h = h + layer.mlp(layer.post_attention_layernorm(h))
+            attn_dim = self.num_heads * self.head_dim
+            attn_out = attn_out.transpose(1, 2).contiguous().view(B, 1, attn_dim)
+
+            if hasattr(layer, "pre_feedforward_layernorm"):
+                # Gemma 2 dual layernorm structure
+                attn_proj = attn.o_proj(attn_out)
+                if hasattr(layer, "post_attention_layernorm") and layer.post_attention_layernorm is not None:
+                    attn_proj = layer.post_attention_layernorm(attn_proj)
+                h = residual + attn_proj
+                mlp_in = layer.pre_feedforward_layernorm(h)
+                mlp_out = layer.mlp(mlp_in)
+                if hasattr(layer, "post_feedforward_layernorm") and layer.post_feedforward_layernorm is not None:
+                    mlp_out = layer.post_feedforward_layernorm(mlp_out)
+                h = h + mlp_out
+            else:
+                # Standard Llama / Qwen / Gemma 1 structure
+                h = residual + attn.o_proj(attn_out)
+                h = h + layer.mlp(layer.post_attention_layernorm(h))
 
             if l == exit_depth - 1:
                 h_exit = h.clone()
@@ -268,6 +286,10 @@ class QwenDynamicEngine:
 
         norm_readout = self.model.model.norm(readout_h)
         logits = self.model.lm_head(norm_readout)
+
+        final_softcapping = getattr(self.config, "final_logit_softcapping", None)
+        if final_softcapping is not None:
+            logits = torch.tanh(logits / final_softcapping) * final_softcapping
 
         return logits, stats
 

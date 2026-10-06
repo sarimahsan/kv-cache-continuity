@@ -90,14 +90,14 @@ CANONICAL_FALLBACK_TEXTS = [
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Tier 1 Manuscript Revision Experiments Runner")
-    parser.add_argument("--model-type", type=str, choices=["qwen", "llama"], default="qwen")
-    parser.add_argument("--model-id", type=str, default=None, help="Hugging Face model ID")
+    parser.add_argument("--model-type", type=str, choices=["qwen", "llama", "gemma"], default="qwen")
+    parser.add_argument("--model-id", type=str, default=None, help="Hugging Face model ID (defaults: Qwen/Qwen2.5-3B, meta-llama/Llama-3.2-1B, google/gemma-2-2b)")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--dtype", type=str, choices=["auto", "bfloat16", "float16", "float32"], default="auto")
     parser.add_argument("--seq-len", type=int, default=64, help="Sequence length for teacher-forced evaluation")
     parser.add_argument("--num-samples", type=int, default=30, help="Number of sequences per seed")
     parser.add_argument("--seeds", type=str, default="42,123,7", help="Comma-separated seeds for multi-seed eval")
-    parser.add_argument("--exit-depth", type=int, default=None, help="Exit depth for K/V swap test (default: 18 for Qwen, 8 for Llama)")
+    parser.add_argument("--exit-depth", type=int, default=None, help="Exit depth for K/V swap test (default: 18 for Qwen, 8 for Llama, 13 for Gemma)")
     parser.add_argument("--output-dir", type=str, default="results/tier1_revision", help="Directory for output CSVs and JSON")
     parser.add_argument("--quick", action="store_true", help="Quick run with 5 samples and 1 seed")
     parser.add_argument("--skip-swap", action="store_true", help="Skip K/V swap test")
@@ -451,10 +451,20 @@ def main():
     device = torch.device(args.device)
 
     if args.model_id is None:
-        args.model_id = "Qwen/Qwen2.5-3B" if args.model_type == "qwen" else "meta-llama/Llama-3.2-1B"
+        if args.model_type == "qwen":
+            args.model_id = "Qwen/Qwen2.5-3B"
+        elif args.model_type == "llama":
+            args.model_id = "meta-llama/Llama-3.2-1B"
+        elif args.model_type == "gemma":
+            args.model_id = "google/gemma-2-2b"
 
     if args.exit_depth is None:
-        args.exit_depth = 18 if args.model_type == "qwen" else 8
+        if args.model_type == "qwen":
+            args.exit_depth = 18
+        elif args.model_type == "llama":
+            args.exit_depth = 8
+        elif args.model_type == "gemma":
+            args.exit_depth = 13
 
     seeds = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
     if args.quick:
@@ -464,8 +474,10 @@ def main():
     # Determine depth sweep set
     if args.model_type == "qwen":
         sweep_depths = [18, 22, 24, 28, 32]
-    else:
+    elif args.model_type == "llama":
         sweep_depths = [4, 8, 11, 14]
+    elif args.model_type == "gemma":
+        sweep_depths = [8, 13, 17, 21, 24]
 
     print("=" * 80)
     print("STARTING TIER 1 EXPERIMENT DRIVER")
