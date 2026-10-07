@@ -279,8 +279,8 @@ def parse_args():
     parser.add_argument(
         "--domains",
         type=str,
-        default="wikitext2,code",
-        help="Comma-separated domains to evaluate: 'wikitext2', 'code'"
+        default="wikitext2,c4,code",
+        help="Comma-separated domains to evaluate: 'wikitext2', 'c4', 'code'"
     )
     parser.add_argument("--num-samples", type=int, default=30, help="Number of evaluated sequences per (domain, T) setting")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for sampling")
@@ -312,6 +312,24 @@ def load_domain_tokens(tokenizer, domain: str, device: torch.device) -> torch.Te
                 toks = tokenizer.encode(raw_text)
                 return torch.tensor(toks, dtype=torch.long)
 
+    elif domain == "c4":
+        try:
+            from datasets import load_dataset
+            print("[*] Loading fast C4 subset (stas/c4-en-10k)...")
+            ds = load_dataset("stas/c4-en-10k", split="train")
+            texts = [item["text"] for item in ds.select(range(min(200, len(ds))))]
+            full_text = "\n\n".join(texts)
+            toks = tokenizer.encode(full_text)
+            if not isinstance(toks, torch.Tensor):
+                toks = torch.tensor(toks, dtype=torch.long)
+            print(f"✓ Loaded C4 subset: {len(toks):,} tokens.")
+            return toks
+        except Exception as e:
+            print(f"[!] Warning: C4 loading failed ({e}). Falling back to multi-domain canonical texts.")
+            raw_text = "\n\n".join(CANONICAL_FALLBACK_TEXTS * 50)
+            toks = tokenizer.encode(raw_text)
+            return torch.tensor(toks, dtype=torch.long)
+
     elif domain == "code":
         raw_text = (PYTHON_CODE_CORPUS.strip() + "\n\n") * 30
         toks = tokenizer.encode(raw_text)
@@ -320,7 +338,7 @@ def load_domain_tokens(tokenizer, domain: str, device: torch.device) -> torch.Te
         return toks
 
     else:
-        raise ValueError(f"Unknown domain '{domain}'. Choose 'wikitext2' or 'code'.")
+        raise ValueError(f"Unknown domain '{domain}'. Choose 'wikitext2', 'c4', or 'code'.")
 
 
 def extract_evaluation_chunks(
@@ -352,80 +370,152 @@ def extract_evaluation_chunks(
 
 
 @torch.no_grad()
-def evaluate_condition_on_chunks(
+def evaluate_stream_on_chunks(
     engine: QwenDynamicEngine,
     sequences: List[torch.Tensor],
     exit_depth: int,
-    mode: str,
-    strategy: str,
-    oracle_logits_cache: Optional[List[List[torch.Tensor]]] = None
-) -> Tuple[Dict[str, float], List[List[torch.Tensor]]]:
-    """Evaluates teacher-forced metrics across chunks."""
-    total_loss = 0.0
-    total_tokens = 0
-    total_kl = 0.0
-    total_top1 = 0
-    saved_logits: List[List[torch.Tensor]] = []
-    t_start = time.perf_counter()
+) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+    """
+    Evaluates Oracle, Native Projection, and Direct Copy sequence-by-sequence.
+    Keeps only ONE sequence of oracle logits in memory at a time, eliminating
+    RAM thrashing on large vocabulary models (Qwen vocab = 151,936).
+    """
+    conds = ["oracle", "native", "direct_copy"]
+    accum = {
+        c: {"loss": 0.0, "tokens": 0, "kl": 0.0, "top1": 0, "elapsed": 0.0}
+        for c in conds
+    }
+
+    num_seqs = len(sequences)
 
     for s_idx, seq in enumerate(sequences):
         T = seq.size(1)
-        kv_cache = engine.init_static_kv_cache(batch_size=1, max_seq_len=T + 16)
-        seq_logits = []
+
+        # -------------------------------------------------------------
+        # 1. Oracle Full Pass
+        # -------------------------------------------------------------
+        t0 = time.perf_counter()
+        kv_oracle = engine.init_static_kv_cache(batch_size=1, max_seq_len=T + 16)
+        oracle_logits_seq = []
 
         for pos in range(T - 1):
             curr_tok = seq[:, pos : pos + 1]
             target_tok = seq[:, pos + 1]
 
             logits, _ = engine.step_forward_decoupled(
-                input_id=curr_tok,
-                pos=pos,
-                kv_cache=kv_cache,
-                exit_depth=exit_depth,
-                mode=mode,
-                strategy=strategy,
-                track_cossim=False
+                input_id=curr_tok, pos=pos, kv_cache=kv_oracle,
+                exit_depth=engine.num_layers, mode="full", strategy="oracle_full"
             )
-
             curr_l = logits[:, 0, :]
-            seq_logits.append(curr_l.detach().cpu())
+            oracle_logits_seq.append(curr_l.detach())
 
             loss = F.cross_entropy(curr_l, target_tok).item()
-            total_loss += loss
-            total_tokens += 1
+            accum["oracle"]["loss"] += loss
+            accum["oracle"]["tokens"] += 1
+            if curr_l.argmax(dim=-1).item() == target_tok.item():
+                accum["oracle"]["top1"] += 1
 
-            if oracle_logits_cache is not None:
-                true_l = oracle_logits_cache[s_idx][pos].to(curr_l.device)
-                p_true = F.softmax(true_l, dim=-1)
-                log_p = F.log_softmax(curr_l, dim=-1)
-                kl = F.kl_div(log_p, p_true, reduction="batchmean").item()
-                total_kl += kl
+        accum["oracle"]["elapsed"] += (time.perf_counter() - t0)
+        del kv_oracle
 
-                if curr_l.argmax(dim=-1).item() == true_l.argmax(dim=-1).item():
-                    total_top1 += 1
-            else:
-                if curr_l.argmax(dim=-1).item() == target_tok.item():
-                    total_top1 += 1
+        # -------------------------------------------------------------
+        # 2. Native Projection Pass
+        # -------------------------------------------------------------
+        t0 = time.perf_counter()
+        kv_native = engine.init_static_kv_cache(batch_size=1, max_seq_len=T + 16)
 
-        saved_logits.append(seq_logits)
+        for pos in range(T - 1):
+            curr_tok = seq[:, pos : pos + 1]
+            target_tok = seq[:, pos + 1]
 
-    elapsed_sec = time.perf_counter() - t_start
-    ms_per_tok = (elapsed_sec / max(1, total_tokens)) * 1000.0
+            logits, _ = engine.step_forward_decoupled(
+                input_id=curr_tok, pos=pos, kv_cache=kv_native,
+                exit_depth=exit_depth, mode="attention_only", strategy="native_projection"
+            )
+            curr_l = logits[:, 0, :]
+            true_l = oracle_logits_seq[pos]
 
-    mean_loss = total_loss / max(1, total_tokens)
-    ppl = math.exp(min(mean_loss, 20.0))
-    mean_kl = (total_kl / max(1, total_tokens)) if oracle_logits_cache is not None else 0.0
-    top1_acc = (total_top1 / max(1, total_tokens)) * 100.0
+            loss = F.cross_entropy(curr_l, target_tok).item()
+            p_true = F.softmax(true_l, dim=-1)
+            log_p = F.log_softmax(curr_l, dim=-1)
+            kl = F.kl_div(log_p, p_true, reduction="batchmean").item()
 
-    metrics = {
-        "loss": mean_loss,
-        "ppl": ppl,
-        "kl_nats": mean_kl,
-        "top1_acc": top1_acc,
-        "total_tokens": total_tokens,
-        "ms_per_tok": ms_per_tok
+            accum["native"]["loss"] += loss
+            accum["native"]["kl"] += kl
+            accum["native"]["tokens"] += 1
+            if curr_l.argmax(dim=-1).item() == true_l.argmax(dim=-1).item():
+                accum["native"]["top1"] += 1
+
+        accum["native"]["elapsed"] += (time.perf_counter() - t0)
+        del kv_native
+
+        # -------------------------------------------------------------
+        # 3. Direct Copy Pass
+        # -------------------------------------------------------------
+        t0 = time.perf_counter()
+        kv_copy = engine.init_static_kv_cache(batch_size=1, max_seq_len=T + 16)
+
+        for pos in range(T - 1):
+            curr_tok = seq[:, pos : pos + 1]
+            target_tok = seq[:, pos + 1]
+
+            logits, _ = engine.step_forward_decoupled(
+                input_id=curr_tok, pos=pos, kv_cache=kv_copy,
+                exit_depth=exit_depth, mode="attention_only", strategy="direct_copy"
+            )
+            curr_l = logits[:, 0, :]
+            true_l = oracle_logits_seq[pos]
+
+            loss = F.cross_entropy(curr_l, target_tok).item()
+            p_true = F.softmax(true_l, dim=-1)
+            log_p = F.log_softmax(curr_l, dim=-1)
+            kl = F.kl_div(log_p, p_true, reduction="batchmean").item()
+
+            accum["direct_copy"]["loss"] += loss
+            accum["direct_copy"]["kl"] += kl
+            accum["direct_copy"]["tokens"] += 1
+            if curr_l.argmax(dim=-1).item() == true_l.argmax(dim=-1).item():
+                accum["direct_copy"]["top1"] += 1
+
+        accum["direct_copy"]["elapsed"] += (time.perf_counter() - t0)
+        del kv_copy
+        del oracle_logits_seq
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        if (s_idx + 1) % 5 == 0 or (s_idx + 1) == num_seqs:
+            print(f"      [Progress] Processed {s_idx + 1}/{num_seqs} sequences...")
+
+    # Summarize metrics
+    res_oracle = {
+        "loss": accum["oracle"]["loss"] / max(1, accum["oracle"]["tokens"]),
+        "ppl": math.exp(min(accum["oracle"]["loss"] / max(1, accum["oracle"]["tokens"]), 20.0)),
+        "kl_nats": 0.0,
+        "top1_acc": (accum["oracle"]["top1"] / max(1, accum["oracle"]["tokens"])) * 100.0,
+        "total_tokens": accum["oracle"]["tokens"],
+        "ms_per_tok": (accum["oracle"]["elapsed"] / max(1, accum["oracle"]["tokens"])) * 1000.0
     }
-    return metrics, saved_logits
+
+    res_native = {
+        "loss": accum["native"]["loss"] / max(1, accum["native"]["tokens"]),
+        "ppl": math.exp(min(accum["native"]["loss"] / max(1, accum["native"]["tokens"]), 20.0)),
+        "kl_nats": accum["native"]["kl"] / max(1, accum["native"]["tokens"]),
+        "top1_acc": (accum["native"]["top1"] / max(1, accum["native"]["tokens"])) * 100.0,
+        "total_tokens": accum["native"]["tokens"],
+        "ms_per_tok": (accum["native"]["elapsed"] / max(1, accum["native"]["tokens"])) * 1000.0
+    }
+
+    res_copy = {
+        "loss": accum["direct_copy"]["loss"] / max(1, accum["direct_copy"]["tokens"]),
+        "ppl": math.exp(min(accum["direct_copy"]["loss"] / max(1, accum["direct_copy"]["tokens"]), 20.0)),
+        "kl_nats": accum["direct_copy"]["kl"] / max(1, accum["direct_copy"]["tokens"]),
+        "top1_acc": (accum["direct_copy"]["top1"] / max(1, accum["direct_copy"]["tokens"])) * 100.0,
+        "total_tokens": accum["direct_copy"]["tokens"],
+        "ms_per_tok": (accum["direct_copy"]["elapsed"] / max(1, accum["direct_copy"]["tokens"])) * 1000.0
+    }
+
+    return res_oracle, res_native, res_copy
 
 
 def main():
@@ -436,8 +526,8 @@ def main():
     if args.quick:
         seq_lens = [64, 128]
         num_samples = 5
-        domains = ["wikitext2", "code"]
-        print("[!] Quick mode enabled: evaluating T in [64, 128], N=5 samples.")
+        domains = ["wikitext2", "c4", "code"]
+        print("[!] Quick mode enabled: evaluating T in [64, 128], N=5 samples across WikiText-2, C4, and Code.")
     else:
         seq_lens = [int(s.strip()) for s in args.seq_lens.split(",")]
         num_samples = args.num_samples
@@ -478,32 +568,11 @@ def main():
                 domain_tokens, seq_len=T, num_samples=num_samples, seed=args.seed, device=device
             )
 
-            # 1. Oracle Baseline
-            print("  [*] Running Condition: Oracle Full (36L)...")
-            oracle_res, oracle_cache = evaluate_condition_on_chunks(
-                engine, chunks, exit_depth=engine.num_layers, mode="full", strategy="oracle_full"
-            )
-            print(f"      -> Oracle: PPL = {oracle_res['ppl']:.2f}")
-
-            # 2. Native Projection (Proposed)
-            print(f"  [*] Running Condition: Native Projection (Exit L={d_t})...")
-            native_res, _ = evaluate_condition_on_chunks(
-                engine, chunks, exit_depth=d_t, mode="attention_only", strategy="native_projection",
-                oracle_logits_cache=oracle_cache
-            )
+            print(f"  [*] Running streaming evaluation on {num_samples} chunks (T={T})...")
+            oracle_res, native_res, copy_res = evaluate_stream_on_chunks(engine, chunks, exit_depth=d_t)
+            print(f"      -> Oracle:      PPL = {oracle_res['ppl']:.2f}")
             print(f"      -> Native Proj: PPL = {native_res['ppl']:.2f} | KL = {native_res['kl_nats']:.4f} nats | Top-1 = {native_res['top1_acc']:.1f}%")
-
-            # 3. Direct Copy (Negative Control)
-            print(f"  [*] Running Condition: Direct Copy (Exit L={d_t})...")
-            copy_res, _ = evaluate_condition_on_chunks(
-                engine, chunks, exit_depth=d_t, mode="attention_only", strategy="direct_copy",
-                oracle_logits_cache=oracle_cache
-            )
             print(f"      -> Direct Copy: PPL = {copy_res['ppl']:.2f} | KL = {copy_res['kl_nats']:.4f} nats | Top-1 = {copy_res['top1_acc']:.1f}%")
-
-            del oracle_cache
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
 
             # Record metrics
             for cond_name, r, delta in [
