@@ -100,8 +100,8 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Teacher-Forced KV-Only Ablation: Disentangling KV Approximation from Exit Head Readout"
     )
-    parser.add_argument("--model-type", type=str, choices=["125m", "qwen", "llama"], default="125m", help="Model family")
-    parser.add_argument("--model-id", type=str, default=None, help="Hugging Face repo (defaults: Qwen/Qwen2.5-3B for qwen, meta-llama/Llama-3.2-1B for llama)")
+    parser.add_argument("--model-type", type=str, choices=["125m", "qwen", "llama", "gemma"], default="125m", help="Model family")
+    parser.add_argument("--model-id", type=str, default=None, help="Hugging Face repo (defaults: Qwen/Qwen2.5-3B for qwen, meta-llama/Llama-3.2-1B for llama, google/gemma-2-2b for gemma)")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to base_model.pt checkpoint")
     parser.add_argument(
         "--depth-schedule",
@@ -485,6 +485,8 @@ def main():
             args.model_id = "meta-llama/Llama-3.2-1B"
         elif args.model_type == "qwen":
             args.model_id = "Qwen/Qwen2.5-3B"
+        elif args.model_type == "gemma":
+            args.model_id = "google/gemma-2-2b"
 
     # Determine exit depths to test
     if args.depth_schedule in ("skipdecode", "fixed"):
@@ -492,6 +494,8 @@ def main():
             default_depth = 6
         elif args.model_type == "llama":
             default_depth = 8 if "1B" in str(args.model_id) else 14
+        elif args.model_type == "gemma":
+            default_depth = 13
         else:
             default_depth = 18
         eval_depths = [args.exit_depth if args.exit_depth is not None else default_depth]
@@ -503,6 +507,8 @@ def main():
                 eval_depths = [4, 6, 8, 10]
             elif args.model_type == "llama":
                 eval_depths = [4, 6, 8, 10, 11, 12, 13, 14] if "1B" in str(args.model_id) else [10, 14, 18, 20, 22, 24]
+            elif args.model_type == "gemma":
+                eval_depths = [8, 13, 17, 21, 24]
             else:
                 eval_depths = [18, 24, 29, 32]
 
@@ -511,7 +517,7 @@ def main():
     engine = None
     model_125m = None
 
-    if args.model_type in ("qwen", "llama"):
+    if args.model_type in ("qwen", "llama", "gemma"):
         from src.qwen_dynamic import QwenDynamicEngine
         print(f"[*] Initializing CausalEngine for {args.model_type} '{args.model_id}'...")
         engine = QwenDynamicEngine(
