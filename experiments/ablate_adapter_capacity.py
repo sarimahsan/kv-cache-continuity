@@ -191,27 +191,45 @@ def main():
         kl_samples = []
         top1_samples = []
 
+        joint_ppl_samples = []
+        joint_kl_samples = []
+        joint_top1_samples = []
+
         for seq in eval_seqs:
             cond_res, _ = evaluate_qwen_sequence(engine, seq, d_target, device, adapter=adapter)
-            # Evaluate readout-only with adapter
+            # Readout-Only with adapter
             ppl_samples.append(cond_res["readout_only"]["ppl"])
             kl_samples.append(cond_res["readout_only"]["mean_kl"])
             top1_samples.append(cond_res["readout_only"]["top1_acc"])
+
+            # Joint Condition: Native Projection KV + Adapter Readout
+            if "combined_native_proj" in cond_res:
+                joint_ppl_samples.append(cond_res["combined_native_proj"]["ppl"])
+                joint_kl_samples.append(cond_res["combined_native_proj"]["mean_kl"])
+                joint_top1_samples.append(cond_res["combined_native_proj"]["top1_acc"])
 
         mean_ppl = float(np.mean(ppl_samples))
         mean_kl = float(np.mean(kl_samples))
         mean_top1 = float(np.mean(top1_samples))
 
-        print(f"  => RESULT (r={rank}): Val PPL = {mean_ppl:.2f} | KL = {mean_kl:.4f} nats | Top-1 = {mean_top1:.1f}%")
+        joint_ppl = float(np.mean(joint_ppl_samples)) if joint_ppl_samples else mean_ppl
+        joint_kl = float(np.mean(joint_kl_samples)) if joint_kl_samples else mean_kl
+        joint_top1 = float(np.mean(joint_top1_samples)) if joint_top1_samples else mean_top1
+
+        print(f"  => RESULT Readout-Only (r={rank}): Val PPL = {mean_ppl:.2f} | KL = {mean_kl:.4f} nats | Top-1 = {mean_top1:.1f}%")
+        print(f"  => RESULT Joint Early-Exit (r={rank}): Val PPL = {joint_ppl:.2f} | KL = {joint_kl:.4f} nats | Top-1 = {joint_top1:.1f}%")
 
         results.append({
             "exit_depth": d_target,
             "rank": rank,
             "trainable_params": trainable_params,
             "train_loss": final_loss,
-            "val_ppl": mean_ppl,
-            "val_kl": mean_kl,
-            "top1_acc": mean_top1,
+            "readout_val_ppl": mean_ppl,
+            "readout_val_kl": mean_kl,
+            "readout_top1_acc": mean_top1,
+            "joint_val_ppl": joint_ppl,
+            "joint_val_kl": joint_kl,
+            "joint_top1_acc": joint_top1,
             "train_time_sec": train_time
         })
 

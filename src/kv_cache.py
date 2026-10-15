@@ -116,6 +116,9 @@ class StaticKVCache:
             self.v_cache[layer_idx][:, :, :end_pos, :],
         )
 
+    # Alias for compatibility with model forward
+    get_context = get_kv
+
     def get_slot(self, layer_idx: int, pos: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Retrieves cached key and value for a single position `pos`.

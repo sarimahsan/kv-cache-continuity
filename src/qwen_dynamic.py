@@ -21,7 +21,10 @@ from typing import Dict, List, Optional, Tuple, Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, AutoTokenizer
+try:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+except ImportError:
+    AutoModelForCausalLM, AutoTokenizer = None, None
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -98,7 +101,21 @@ class QwenDynamicEngine:
             )
             for _ in range(self.num_layers)
         ]
-        return {"k": k_buffers, "v": v_buffers}
+        oracle_k = [
+            torch.zeros(
+                batch_size, self.num_kv_heads, max_seq_len, self.head_dim,
+                dtype=self.dtype, device=self.device
+            )
+            for _ in range(self.num_layers)
+        ]
+        oracle_v = [
+            torch.zeros(
+                batch_size, self.num_kv_heads, max_seq_len, self.head_dim,
+                dtype=self.dtype, device=self.device
+            )
+            for _ in range(self.num_layers)
+        ]
+        return {"k": k_buffers, "v": v_buffers, "oracle_k": oracle_k, "oracle_v": oracle_v}
 
     def _get_cos_sin_single(self, layer, pos: int) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Retrieves rotary cosine and sine embeddings for a single position index."""
@@ -168,6 +185,11 @@ class QwenDynamicEngine:
                 q = apply_rotary_pos_emb_single(q, cos, sin)
                 k = apply_rotary_pos_emb_single(k, cos, sin)
 
+            # Save true (k, v) into oracle cache for exact attention error measurement
+            if "oracle_k" in kv_cache:
+                kv_cache["oracle_k"][l][:, :, pos : pos + 1, :] = k
+                kv_cache["oracle_v"][l][:, :, pos : pos + 1, :] = v
+
             # Store computed true KV into cache
             # In attention_only with early exit: for l >= exit_depth, past KV was reconstructed
             if mode == "attention_only" and l >= exit_depth:
@@ -186,22 +208,15 @@ class QwenDynamicEngine:
                     kv_cache["k"][l][:, :, pos : pos + 1, :] = k_proj
                     kv_cache["v"][l][:, :, pos : pos + 1, :] = v_proj
 
-                    if track_cossim and stats is not None:
-                        cos_k = F.cosine_similarity(true_k.flatten().float(), k_proj.flatten().float(), dim=0).item()
-                        cos_v = F.cosine_similarity(true_v.flatten().float(), v_proj.flatten().float(), dim=0).item()
-                        rel_k = (torch.norm(true_k.float() - k_proj.float()) / (torch.norm(true_k.float()) + 1e-8)).item()
-                        rel_v = (torch.norm(true_v.float() - v_proj.float()) / (torch.norm(true_v.float()) + 1e-8)).item()
-                        stats[l] = {"cos_k": cos_k, "cos_v": cos_v, "rel_k": rel_k, "rel_v": rel_v}
-
                 elif strategy == "oracle_k_proj_v":
-                    # Experiment C: Oracle K + Projected V
+                    # Causal Swap: Oracle K + Projected V
                     norm_exit = layer.input_layernorm(h_exit)
                     v_proj = attn.v_proj(norm_exit).view(B, 1, self.num_kv_heads, self.head_dim).transpose(1, 2)
                     kv_cache["k"][l][:, :, pos : pos + 1, :] = k
                     kv_cache["v"][l][:, :, pos : pos + 1, :] = v_proj
 
                 elif strategy == "proj_k_oracle_v":
-                    # Experiment C: Projected K + Oracle V
+                    # Causal Swap: Projected K + Oracle V
                     norm_exit = layer.input_layernorm(h_exit)
                     k_proj = attn.k_proj(norm_exit).view(B, 1, self.num_kv_heads, self.head_dim).transpose(1, 2)
                     if cos is not None and sin is not None:
@@ -214,6 +229,11 @@ class QwenDynamicEngine:
                     src_v = kv_cache["v"][exit_depth - 1][:, :, pos : pos + 1, :].clone()
                     kv_cache["k"][l][:, :, pos : pos + 1, :] = src_k
                     kv_cache["v"][l][:, :, pos : pos + 1, :] = src_v
+
+                elif strategy in ("cache_omission", "omission"):
+                    # Cache Omission baseline: skipped slots absent (masked out)
+                    kv_cache["k"][l][:, :, pos : pos + 1, :] = k
+                    kv_cache["v"][l][:, :, pos : pos + 1, :] = v
 
                 else:
                     kv_cache["k"][l][:, :, pos : pos + 1, :] = k
@@ -231,9 +251,69 @@ class QwenDynamicEngine:
                 k_hist = k_hist.repeat_interleave(n_rep, dim=1)
                 v_hist = v_hist.repeat_interleave(n_rep, dim=1)
 
-            attn_out = F.scaled_dot_product_attention(q, k_hist, v_hist, is_causal=False)
+            # Mask out skipped slots if cache omission is active
+            attn_mask = None
+            if (mode in ("attention_only", "combined") and l >= exit_depth and strategy in ("cache_omission", "omission")):
+                if pos > 0:
+                    attn_mask = torch.full((1, 1, 1, pos + 1), float("-inf"), dtype=q.dtype, device=self.device)
+                    attn_mask[..., pos] = 0.0
+
+            attn_out_heads = F.scaled_dot_product_attention(q, k_hist, v_hist, attn_mask=attn_mask, is_causal=False)
             attn_dim = self.num_heads * self.head_dim
-            attn_out = attn_out.transpose(1, 2).contiguous().view(B, 1, attn_dim)
+            attn_out = attn_out_heads.transpose(1, 2).contiguous().view(B, 1, attn_dim)
+
+            # Metric tracking: Cosine (standard + centered) & Direct Attention Output Error ||Attn(K*,V*) - Attn(K̂,V̂)||
+            if track_cossim and stats is not None and mode == "attention_only" and l >= exit_depth:
+                k_eval = kv_cache["k"][l][:, :, pos : pos + 1, :]
+                v_eval = kv_cache["v"][l][:, :, pos : pos + 1, :]
+
+                cos_k = F.cosine_similarity(true_k.flatten().float(), k_eval.flatten().float(), dim=0).item()
+                cos_v = F.cosine_similarity(true_v.flatten().float(), v_eval.flatten().float(), dim=0).item()
+                rel_k = (torch.norm(true_k.float() - k_eval.float()) / (torch.norm(true_k.float()) + 1e-8)).item()
+                rel_v = (torch.norm(true_v.float() - v_eval.float()) / (torch.norm(true_v.float()) + 1e-8)).item()
+
+                # Centered cosine (removes Qwen QKV bias / mean component)
+                k_true_c = true_k.float() - true_k.float().mean()
+                k_eval_c = k_eval.float() - k_eval.float().mean()
+                cent_cos_k = F.cosine_similarity(k_true_c.flatten(), k_eval_c.flatten(), dim=0).item() if torch.norm(k_true_c) > 1e-8 and torch.norm(k_eval_c) > 1e-8 else 0.0
+
+                v_true_c = true_v.float() - true_v.float().mean()
+                v_eval_c = v_eval.float() - v_eval.float().mean()
+                cent_cos_v = F.cosine_similarity(v_true_c.flatten(), v_eval_c.flatten(), dim=0).item() if torch.norm(v_true_c) > 1e-8 and torch.norm(v_eval_c) > 1e-8 else 0.0
+
+                # Direct Attention Error: ||Attn(K*, V*) - Attn(K̂, V̂)||
+                attn_err_fro = 0.0
+                attn_err_rel = 0.0
+                attn_cos = 1.0
+                attn_cent_cos = 1.0
+                if "oracle_k" in kv_cache:
+                    k_oracle_hist = kv_cache["oracle_k"][l][:, :, : pos + 1, :]
+                    v_oracle_hist = kv_cache["oracle_v"][l][:, :, : pos + 1, :]
+                    if self.num_kv_heads != self.num_heads:
+                        n_rep = self.num_heads // self.num_kv_heads
+                        k_oracle_hist = k_oracle_hist.repeat_interleave(n_rep, dim=1)
+                        v_oracle_hist = v_oracle_hist.repeat_interleave(n_rep, dim=1)
+                    attn_oracle = F.scaled_dot_product_attention(q, k_oracle_hist, v_oracle_hist, is_causal=False)
+                    attn_diff = attn_oracle.float() - attn_out_heads.float()
+                    attn_err_fro = torch.norm(attn_diff).item()
+                    attn_err_rel = (attn_err_fro / (torch.norm(attn_oracle.float()) + 1e-8)).item()
+                    attn_cos = F.cosine_similarity(attn_oracle.flatten().float(), attn_out_heads.flatten().float(), dim=0).item()
+                    attn_oracle_c = attn_oracle.float() - attn_oracle.float().mean()
+                    attn_out_c = attn_out_heads.float() - attn_out_heads.float().mean()
+                    attn_cent_cos = F.cosine_similarity(attn_oracle_c.flatten(), attn_out_c.flatten(), dim=0).item() if torch.norm(attn_oracle_c) > 1e-8 and torch.norm(attn_out_c) > 1e-8 else 0.0
+
+                stats[l] = {
+                    "cos_k": cos_k,
+                    "cos_v": cos_v,
+                    "centered_cos_k": cent_cos_k,
+                    "centered_cos_v": cent_cos_v,
+                    "rel_k": rel_k,
+                    "rel_v": rel_v,
+                    "attn_fro_err": attn_err_fro,
+                    "attn_rel_err": attn_err_rel,
+                    "attn_cos": attn_cos,
+                    "attn_centered_cos": attn_cent_cos
+                }
 
             if hasattr(layer, "pre_feedforward_layernorm"):
                 # Gemma 2 dual layernorm structure

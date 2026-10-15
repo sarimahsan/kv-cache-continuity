@@ -212,23 +212,24 @@ class TransformerLM(nn.Module):
             h = layer(h, kv_cache=cache)
 
         curr_token = torch.argmax(self.lm_head(self.ln_f(h[:, -1:, :])), dim=-1)
-        output_ids = [prompt_ids, curr_token]
+        output_ids = [prompt_ids]
         executed_depths = []
 
         curr_pos = T
         for step in range(max_new_tokens):
             d = depth_policy[step % len(depth_policy)]
             executed_depths.append(d)
-            logits, _ = self.forward_step(
-                input_id=curr_token,
-                pos=curr_pos,
-                kv_cache=cache,
-                exit_depth=d,
-                state_prop_strategy=state_prop_strategy,
-            )
-            curr_token = torch.argmax(logits, dim=-1)
             output_ids.append(curr_token)
-            curr_pos += 1
+            if step < max_new_tokens - 1:
+                logits, _ = self.forward_step(
+                    input_id=curr_token,
+                    pos=curr_pos,
+                    kv_cache=cache,
+                    exit_depth=d,
+                    state_prop_strategy=state_prop_strategy,
+                )
+                curr_token = torch.argmax(logits, dim=-1)
+                curr_pos += 1
 
         return {
             "output_ids": torch.cat(output_ids, dim=1),

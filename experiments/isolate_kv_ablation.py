@@ -367,6 +367,7 @@ def evaluate_qwen_sequence(
     conditions = [
         ("full_depth", num_layers, "full", "oracle_full"),
         ("readout_only", exit_depth, "readout_only", "oracle_full"),
+        ("attn_cache_omission", exit_depth, "attention_only", "cache_omission"),
         ("attn_native_proj", exit_depth, "attention_only", "native_projection"),
         ("attn_direct_copy", exit_depth, "attention_only", "direct_copy"),
         ("combined_native_proj", exit_depth, "combined", "native_projection"),
@@ -376,7 +377,16 @@ def evaluate_qwen_sequence(
     use_cuda = device.type == "cuda"
     cond_metrics = {}
     oracle_logits_seq = []
-    cossim_accum = {l: {"cos_k": [], "cos_v": [], "rel_k": [], "rel_v": []} for l in range(exit_depth, num_layers)}
+    cossim_accum = {
+        l: {
+            "cos_k": [], "cos_v": [],
+            "centered_cos_k": [], "centered_cos_v": [],
+            "attn_fro_err": [], "attn_rel_err": [],
+            "attn_cos": [], "attn_centered_cos": [],
+            "rel_k": [], "rel_v": []
+        }
+        for l in range(exit_depth, num_layers)
+    }
 
     for cond_name, d_t, mode, strategy in conditions:
         cache = engine.init_static_kv_cache(batch_size=1, max_seq_len=T + 16)
@@ -428,10 +438,9 @@ def evaluate_qwen_sequence(
             if should_track_cossim and stats is not None:
                 for l, st in stats.items():
                     if l in cossim_accum:
-                        cossim_accum[l]["cos_k"].append(st["cos_k"])
-                        cossim_accum[l]["cos_v"].append(st["cos_v"])
-                        cossim_accum[l]["rel_k"].append(st["rel_k"])
-                        cossim_accum[l]["rel_v"].append(st["rel_v"])
+                        for k in cossim_accum[l].keys():
+                            if k in st:
+                                cossim_accum[l][k].append(st[k])
 
         if use_cuda:
             end_event.record()
@@ -458,10 +467,8 @@ def evaluate_qwen_sequence(
     for l in cossim_accum:
         if cossim_accum[l]["cos_k"]:
             layer_cossim_summary[l] = {
-                "cos_k": float(np.mean(cossim_accum[l]["cos_k"])),
-                "cos_v": float(np.mean(cossim_accum[l]["cos_v"])),
-                "rel_k": float(np.mean(cossim_accum[l]["rel_k"])),
-                "rel_v": float(np.mean(cossim_accum[l]["rel_v"]))
+                k: float(np.mean(cossim_accum[l][k])) if cossim_accum[l][k] else 0.0
+                for k in cossim_accum[l].keys()
             }
 
     return cond_metrics, layer_cossim_summary
@@ -647,43 +654,56 @@ def main():
                 "ms_tok": ms_val
             })
 
-        # Aggregate CosSim across sequences
+        # Aggregate CosSim & Direct Attention Error across sequences
         all_layers = sorted(layer_cossims_list[0].keys())
         for l in all_layers:
-            c_k = float(np.mean([s[l]["cos_k"] for s in layer_cossims_list if l in s]))
-            c_v = float(np.mean([s[l]["cos_v"] for s in layer_cossims_list if l in s]))
-            r_k = float(np.mean([s[l]["rel_k"] for s in layer_cossims_list if l in s]))
-            r_v = float(np.mean([s[l]["rel_v"] for s in layer_cossims_list if l in s]))
+            c_k = float(np.mean([s[l]["cos_k"] for s in layer_cossims_list if l in s and "cos_k" in s[l]]))
+            c_v = float(np.mean([s[l]["cos_v"] for s in layer_cossims_list if l in s and "cos_v" in s[l]]))
+            c_k_cent = float(np.mean([s[l]["centered_cos_k"] for s in layer_cossims_list if l in s and "centered_cos_k" in s[l]]))
+            c_v_cent = float(np.mean([s[l]["centered_cos_v"] for s in layer_cossims_list if l in s and "centered_cos_v" in s[l]]))
+            attn_fro = float(np.mean([s[l]["attn_fro_err"] for s in layer_cossims_list if l in s and "attn_fro_err" in s[l]]))
+            attn_rel = float(np.mean([s[l]["attn_rel_err"] for s in layer_cossims_list if l in s and "attn_rel_err" in s[l]]))
+            attn_cos = float(np.mean([s[l]["attn_cos"] for s in layer_cossims_list if l in s and "attn_cos" in s[l]]))
+            r_k = float(np.mean([s[l]["rel_k"] for s in layer_cossims_list if l in s and "rel_k" in s[l]]))
+            r_v = float(np.mean([s[l]["rel_v"] for s in layer_cossims_list if l in s and "rel_v" in s[l]]))
+
             all_cossim_results.append({
                 "exit_depth": depth,
                 "layer_0_indexed": l,
                 "layer_1_indexed": l + 1,
                 "cos_sim_k": c_k,
+                "cos_sim_k_centered": c_k_cent,
                 "cos_sim_v": c_v,
+                "cos_sim_v_centered": c_v_cent,
+                "attn_fro_err": attn_fro,
+                "attn_rel_err": attn_rel,
+                "attn_cos": attn_cos,
                 "rel_err_k": r_k,
                 "rel_err_v": r_v
             })
 
         # Print console table for this depth
         print(f"\nConsolidated Results for Exit Depth L = {depth}:")
-        print("-" * 88)
-        print(f"{'Condition':<25} {'Depth':<8} {'PPL':<10} {'Δ PPL':<12} {'Mean KL':<10} {'Top-1 (%)':<11} {'ms/tok':<8}")
-        print("-" * 88)
+        print("-" * 92)
+        print(f"{'Condition':<26} {'Depth':<8} {'PPL':<10} {'Δ PPL':<12} {'Mean KL':<10} {'Top-1 (%)':<11} {'ms/tok':<8}")
+        print("-" * 92)
         cond_order = [
             "full_depth",
             "readout_only",
+            "attn_cache_omission",
             "attn_native_proj",
             "attn_direct_copy",
             "combined_native_proj",
             "combined_direct_copy"
         ]
         for c in cond_order:
-            row = agg_cond[c]
-            print(
-                f"{c:<25} {row['depth']:<8} {row['ppl']:<10.4f} {row['delta_ppl']:<+12.4f} "
-                f"{row['mean_kl']:<10.4f} {row['top1_acc']:<11.1f} {row['ms_tok']:<8.2f}"
-            )
-        print("-" * 88)
+            if c in agg_cond:
+                row = agg_cond[c]
+                print(
+                    f"{c:<26} {row['depth']:<8} {row['ppl']:<10.4f} {row['delta_ppl']:<+12.4f} "
+                    f"{row['mean_kl']:<10.4f} {row['top1_acc']:<11.1f} {row['ms_tok']:<8.2f}"
+                )
+        print("-" * 92)
 
     # Save summary CSV
     out_csv = os.path.join(args.output_dir, f"kv_ablation_{args.model_type}_depth_{args.depth_schedule}.csv")
@@ -695,15 +715,15 @@ def main():
         writer.writerows(all_depth_results)
     print(f"\n[+] Saved detailed condition CSV to {out_csv}")
 
-    # Save CosSim CSV
+    # Save CosSim & Direct Attention Error CSV
     cossim_csv = os.path.join(args.output_dir, f"cossim_teacher_forced_{args.model_type}.csv")
     with open(cossim_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["exit_depth", "layer_0_indexed", "layer_1_indexed", "cos_sim_k", "cos_sim_v", "rel_err_k", "rel_err_v"]
+            f, fieldnames=list(all_cossim_results[0].keys())
         )
         writer.writeheader()
         writer.writerows(all_cossim_results)
-    print(f"[+] Saved teacher-forced CosSim decay CSV to {cossim_csv}")
+    print(f"[+] Saved teacher-forced CosSim and Attention Error decay CSV to {cossim_csv}")
 
     # Generate Markdown Table for Paper
     print("\n" + "=" * 80)
