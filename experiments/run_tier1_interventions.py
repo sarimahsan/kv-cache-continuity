@@ -642,7 +642,8 @@ def run_centered_cosine_diagnostic(
 ) -> List[Dict[str, Any]]:
     print("\n" + "=" * 90)
     print("EXPERIMENT 3: CENTERED COSINE & DIRECT ATTENTION-OUTPUT ERROR")
-    print(f"Model ID: {engine.model_id} | Exit Depth: L = {exit_depth}")
+    model_name = getattr(engine, "model_id", "Qwen/Qwen2.5-3B")
+    print(f"Model ID: {model_name} | Exit Depth: L = {exit_depth}")
     print("Computes standard vs. centered cosine for (K, V) and ||Attn(K*,V*) - Attn(K̂,V̂)|| per layer")
     print("=" * 90)
 

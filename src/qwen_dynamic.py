@@ -53,6 +53,7 @@ class QwenDynamicEngine:
         candidate_layers: Optional[List[int]] = None,
         **kwargs,
     ):
+        self.model_id = model_id
         self.device = torch.device(device)
         if dtype is None:
             if self.device.type == "cuda" and torch.cuda.is_bf16_supported():
