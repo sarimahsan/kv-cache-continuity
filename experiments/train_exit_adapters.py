@@ -434,6 +434,18 @@ def main():
         del saved_states, terminal_h, teacher_logits
         torch.cuda.empty_cache()
 
+        step_loss = float(np.mean(ce_losses)) + float(np.mean(kd_losses) if kd_losses else 0.0)
+
+        # Print training progress every 10 steps so output is never stuck
+        if step % 10 == 0 or step == 1:
+            elapsed_m = (time.perf_counter() - t_start) / 60.0
+            steps_per_sec = step / max(1e-4, time.perf_counter() - t_start)
+            print(
+                f"Step {step:>5}/{args.steps} | LR: {curr_lr:.2e} | Loss: {step_loss:.4f} | "
+                f"CE: {np.mean(ce_losses):.4f} | KD: {np.mean(kd_losses):.4f} | {steps_per_sec:.2f} it/s | {elapsed_m:.1f}m elapsed",
+                flush=True
+            )
+
         # Validation evaluation at intervals
         if step % args.eval_every == 0 or step == args.steps:
             val_results = evaluate_validation(
@@ -451,14 +463,15 @@ def main():
 
             elapsed_str = f"{(time.perf_counter() - t_start) / 60.0:.1f}m"
             print(
-                f"{step:<7} | {curr_lr:<9.2e} | {total_loss.item():<11.4f} | {np.mean(kd_losses):<10.4f} | "
-                f"{primary_val['val_ppl']:<14.2f} | {primary_val['val_kl']:<10.4f} | {primary_val['val_top1']:<10.2f}% | {elapsed_str:<8}"
+                f"\n>>> [EVAL @ Step {step}] PPL (L={primary_d}): {primary_val['val_ppl']:.2f} | "
+                f"KL: {primary_val['val_kl']:.4f} | Top-1: {primary_val['val_top1']:.2f}% | Elapsed: {elapsed_str}\n",
+                flush=True
             )
 
             log_entry = {
                 "step": step,
                 "lr": curr_lr,
-                "train_loss": total_loss.item(),
+                "train_loss": step_loss,
                 "mean_ce": float(np.mean(ce_losses)),
                 "mean_kd": float(np.mean(kd_losses)),
                 "elapsed_sec": time.perf_counter() - t_start,
@@ -471,6 +484,7 @@ def main():
                 best_val_top1 = primary_val["val_top1"]
                 best_ckpt_path = os.path.join(args.output_dir, f"best_exit_adapters_{args.model_type}_{args.adapter_type}_r{args.rank}.pt")
                 calibration_module.save_checkpoint(best_ckpt_path)
+                print(f"[+] Saved new best validation checkpoint ({best_val_top1:.2f}% top-1) to: {best_ckpt_path}", flush=True)
 
     # 6. Save final checkpoint and training curve CSV
     final_ckpt_path = os.path.join(args.output_dir, f"final_exit_adapters_{args.model_type}_{args.adapter_type}_r{args.rank}.pt")
