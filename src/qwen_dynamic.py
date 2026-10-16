@@ -181,6 +181,7 @@ class QwenDynamicEngine:
             v = attn.v_proj(norm_h).view(B, 1, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
             cos, sin = self._get_cos_sin_single(layer, pos)
+            true_k_pre_rope = k.clone()
             if cos is not None and sin is not None:
                 q = apply_rotary_pos_emb_single(q, cos, sin)
                 k = apply_rotary_pos_emb_single(k, cos, sin)
@@ -190,6 +191,7 @@ class QwenDynamicEngine:
                 kv_cache["oracle_k"][l][:, :, pos : pos + 1, :] = k
                 kv_cache["oracle_v"][l][:, :, pos : pos + 1, :] = v
 
+            k_proj_pre_rope = None
             # Store computed true KV into cache
             # In attention_only with early exit: for l >= exit_depth, past KV was reconstructed
             if mode == "attention_only" and l >= exit_depth:
@@ -202,6 +204,7 @@ class QwenDynamicEngine:
                     norm_exit = layer.input_layernorm(h_exit)
                     k_proj = attn.k_proj(norm_exit).view(B, 1, self.num_kv_heads, self.head_dim).transpose(1, 2)
                     v_proj = attn.v_proj(norm_exit).view(B, 1, self.num_kv_heads, self.head_dim).transpose(1, 2)
+                    k_proj_pre_rope = k_proj.clone()
                     if cos is not None and sin is not None:
                         k_proj = apply_rotary_pos_emb_single(k_proj, cos, sin)
 
@@ -219,6 +222,7 @@ class QwenDynamicEngine:
                     # Causal Swap: Projected K + Oracle V
                     norm_exit = layer.input_layernorm(h_exit)
                     k_proj = attn.k_proj(norm_exit).view(B, 1, self.num_kv_heads, self.head_dim).transpose(1, 2)
+                    k_proj_pre_rope = k_proj.clone()
                     if cos is not None and sin is not None:
                         k_proj = apply_rotary_pos_emb_single(k_proj, cos, sin)
                     kv_cache["k"][l][:, :, pos : pos + 1, :] = k_proj
@@ -230,10 +234,40 @@ class QwenDynamicEngine:
                     kv_cache["k"][l][:, :, pos : pos + 1, :] = src_k
                     kv_cache["v"][l][:, :, pos : pos + 1, :] = src_v
 
+                elif strategy == "zero_fill":
+                    kv_cache["k"][l][:, :, pos : pos + 1, :] = torch.zeros_like(k)
+                    kv_cache["v"][l][:, :, pos : pos + 1, :] = torch.zeros_like(v)
+
+                elif strategy == "mean_fill":
+                    if pos > 0:
+                        kv_cache["k"][l][:, :, pos : pos + 1, :] = kv_cache["k"][l][:, :, :pos, :].mean(dim=2, keepdim=True)
+                        kv_cache["v"][l][:, :, pos : pos + 1, :] = kv_cache["v"][l][:, :, :pos, :].mean(dim=2, keepdim=True)
+                    else:
+                        kv_cache["k"][l][:, :, pos : pos + 1, :] = torch.zeros_like(k)
+                        kv_cache["v"][l][:, :, pos : pos + 1, :] = torch.zeros_like(v)
+
+                elif strategy == "prev_token_copy":
+                    if pos > 0:
+                        kv_cache["k"][l][:, :, pos : pos + 1, :] = kv_cache["k"][l][:, :, pos - 1 : pos, :].clone()
+                        kv_cache["v"][l][:, :, pos : pos + 1, :] = kv_cache["v"][l][:, :, pos - 1 : pos, :].clone()
+                    else:
+                        kv_cache["k"][l][:, :, pos : pos + 1, :] = torch.zeros_like(k)
+                        kv_cache["v"][l][:, :, pos : pos + 1, :] = torch.zeros_like(v)
+
+                elif strategy == "calm_propagation":
+                    # CALM-style state copy-propagation: hidden state copied forward through unexecuted blocks
+                    norm_exit = layer.input_layernorm(h_exit)
+                    k_proj = attn.k_proj(norm_exit).view(B, 1, self.num_kv_heads, self.head_dim).transpose(1, 2)
+                    v_proj = attn.v_proj(norm_exit).view(B, 1, self.num_kv_heads, self.head_dim).transpose(1, 2)
+                    if cos is not None and sin is not None:
+                        k_proj = apply_rotary_pos_emb_single(k_proj, cos, sin)
+                    kv_cache["k"][l][:, :, pos : pos + 1, :] = k_proj
+                    kv_cache["v"][l][:, :, pos : pos + 1, :] = v_proj
+
                 elif strategy in ("cache_omission", "omission"):
                     # Cache Omission baseline: skipped slots absent (masked out)
-                    kv_cache["k"][l][:, :, pos : pos + 1, :] = k
-                    kv_cache["v"][l][:, :, pos : pos + 1, :] = v
+                    kv_cache["k"][l][:, :, pos : pos + 1, :] = torch.zeros_like(k)
+                    kv_cache["v"][l][:, :, pos : pos + 1, :] = torch.zeros_like(v)
 
                 else:
                     kv_cache["k"][l][:, :, pos : pos + 1, :] = k
@@ -302,9 +336,14 @@ class QwenDynamicEngine:
                     attn_out_c = attn_out_heads.float() - attn_out_heads.float().mean()
                     attn_cent_cos = F.cosine_similarity(attn_oracle_c.flatten(), attn_out_c.flatten(), dim=0).item() if torch.norm(attn_oracle_c) > 1e-8 and torch.norm(attn_out_c) > 1e-8 else 0.0
 
+                cos_k_pre = 1.0
+                if k_proj_pre_rope is not None and "true_k_pre_rope" in locals():
+                    cos_k_pre = F.cosine_similarity(true_k_pre_rope.flatten().float(), k_proj_pre_rope.flatten().float(), dim=0).item()
+
                 stats[l] = {
                     "cos_k": cos_k,
                     "cos_v": cos_v,
+                    "cos_k_pre_rope": cos_k_pre,
                     "centered_cos_k": cent_cos_k,
                     "centered_cos_v": cent_cos_v,
                     "rel_k": rel_k,
@@ -340,7 +379,7 @@ class QwenDynamicEngine:
                 layer = self.model.model.layers[l]
                 cos, sin = self._get_cos_sin_single(layer, pos)
 
-                if strategy == "native_projection":
+                if strategy in ("native_projection", "calm_propagation"):
                     norm_exit = layer.input_layernorm(h_exit)
                     k_proj = layer.self_attn.k_proj(norm_exit).view(B, 1, self.num_kv_heads, self.head_dim).transpose(1, 2)
                     v_proj = layer.self_attn.v_proj(norm_exit).view(B, 1, self.num_kv_heads, self.head_dim).transpose(1, 2)
@@ -355,6 +394,30 @@ class QwenDynamicEngine:
                     src_v = kv_cache["v"][exit_depth - 1][:, :, pos : pos + 1, :].clone()
                     kv_cache["k"][l][:, :, pos : pos + 1, :] = src_k
                     kv_cache["v"][l][:, :, pos : pos + 1, :] = src_v
+
+                elif strategy == "zero_fill":
+                    kv_cache["k"][l][:, :, pos : pos + 1, :].zero_()
+                    kv_cache["v"][l][:, :, pos : pos + 1, :].zero_()
+
+                elif strategy == "mean_fill":
+                    if pos > 0:
+                        kv_cache["k"][l][:, :, pos : pos + 1, :] = kv_cache["k"][l][:, :, :pos, :].mean(dim=2, keepdim=True)
+                        kv_cache["v"][l][:, :, pos : pos + 1, :] = kv_cache["v"][l][:, :, :pos, :].mean(dim=2, keepdim=True)
+                    else:
+                        kv_cache["k"][l][:, :, pos : pos + 1, :].zero_()
+                        kv_cache["v"][l][:, :, pos : pos + 1, :].zero_()
+
+                elif strategy == "prev_token_copy":
+                    if pos > 0:
+                        kv_cache["k"][l][:, :, pos : pos + 1, :] = kv_cache["k"][l][:, :, pos - 1 : pos, :].clone()
+                        kv_cache["v"][l][:, :, pos : pos + 1, :] = kv_cache["v"][l][:, :, pos - 1 : pos, :].clone()
+                    else:
+                        kv_cache["k"][l][:, :, pos : pos + 1, :].zero_()
+                        kv_cache["v"][l][:, :, pos : pos + 1, :].zero_()
+
+                elif strategy in ("cache_omission", "omission"):
+                    kv_cache["k"][l][:, :, pos : pos + 1, :].zero_()
+                    kv_cache["v"][l][:, :, pos : pos + 1, :].zero_()
 
         # Determine readout state
         if mode in ("readout_only", "combined"):

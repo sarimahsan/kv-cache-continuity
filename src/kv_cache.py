@@ -190,6 +190,51 @@ class StaticKVCache:
             for l in range(exit_depth, self.n_layers):
                 self.update(l, k_src.clone(), v_src.clone(), pos)
 
+        elif strategy == "mean_fill":
+            # Per-layer running mean of token history
+            for l in range(exit_depth, self.n_layers):
+                if pos > 0:
+                    k_mean = self.k_cache[l][:, :, :pos, :].mean(dim=2, keepdim=True)
+                    v_mean = self.v_cache[l][:, :, :pos, :].mean(dim=2, keepdim=True)
+                else:
+                    k_mean = torch.zeros(B, self.n_heads, 1, self.head_dim, dtype=self.dtype, device=self.device)
+                    v_mean = torch.zeros(B, self.n_heads, 1, self.head_dim, dtype=self.dtype, device=self.device)
+                self.update(l, k_mean, v_mean, pos)
+
+        elif strategy == "prev_token_copy":
+            # Previous-token's real K/V at each skipped layer
+            for l in range(exit_depth, self.n_layers):
+                if pos > 0:
+                    k_prev, v_prev = self.get_slot(l, pos - 1)
+                else:
+                    k_prev = torch.zeros(B, self.n_heads, 1, self.head_dim, dtype=self.dtype, device=self.device)
+                    v_prev = torch.zeros(B, self.n_heads, 1, self.head_dim, dtype=self.dtype, device=self.device)
+                self.update(l, k_prev.clone(), v_prev.clone(), pos)
+
+        elif strategy == "learned_linear":
+            # Uses a tiny learned linear predictor module if passed via kwargs or attributes
+            for l in range(exit_depth, self.n_layers):
+                block = layers[l]
+                linear_predictor = getattr(block, "kv_predictor", None)
+                if linear_predictor is not None:
+                    k_pred, v_pred = linear_predictor(h_exit)
+                    self.update(l, k_pred, v_pred, pos)
+                else:
+                    # Fallback to native projection if not trained
+                    norm_h = block.ln_1(h_exit)
+                    qkv = block.attn.qkv_proj(norm_h)
+                    _, k_proj, v_proj = qkv.chunk(3, dim=-1)
+                    k_proj = k_proj.view(B, 1, self.n_heads, self.head_dim).transpose(1, 2)
+                    v_proj = v_proj.view(B, 1, self.n_heads, self.head_dim).transpose(1, 2)
+                    self.update(l, k_proj, v_proj, pos)
+
+        elif strategy in ("cache_omission", "omission"):
+            # Explicitly mark slot as omitted (zeros in buffer, masked during attention)
+            for l in range(exit_depth, self.n_layers):
+                k_zero = torch.zeros(B, self.n_heads, 1, self.head_dim, dtype=self.dtype, device=self.device)
+                v_zero = torch.zeros(B, self.n_heads, 1, self.head_dim, dtype=self.dtype, device=self.device)
+                self.update(l, k_zero, v_zero, pos)
+
         elif strategy == "mla_latent":
             # MLA Latent Bottleneck:
             # First layer LN and QKV down-projection compress h_exit into a compact latent space,
@@ -205,6 +250,21 @@ class StaticKVCache:
 
         else:
             raise ValueError(f"Unknown KV state propagation strategy: '{strategy}'")
+
+    def get_attention_mask_for_omission(self, layer_idx: int, pos: int, device: torch.device) -> Optional[torch.Tensor]:
+        """
+        Generates an attention mask (1, 1, 1, pos + 1) where positions where layer_idx was skipped
+        are masked with -inf so attention completely ignores omitted slots.
+        """
+        # depth_history[:, p] has exit depth for token p
+        # If exit_depth <= layer_idx, then layer_idx was skipped for token p!
+        history = self.depth_history[0, : pos + 1]
+        skipped_mask = (history > 0) & (history <= layer_idx)
+        if not skipped_mask.any():
+            return None
+        mask = torch.zeros((1, 1, 1, pos + 1), dtype=torch.float32, device=device)
+        mask[0, 0, 0, skipped_mask] = float("-inf")
+        return mask
 
 
 class MLAKVCache:

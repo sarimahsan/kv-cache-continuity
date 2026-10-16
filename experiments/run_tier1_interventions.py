@@ -698,7 +698,7 @@ def run_centered_cosine_diagnostic(
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"\n✓ Saved Centered Cosine & Attention Output Error diagnostic to {csv_path}")
+    print(f"\n[OK] Saved Centered Cosine & Attention Output Error diagnostic to {csv_path}")
     return rows
 
 
@@ -767,14 +767,14 @@ def main():
         print(f"[*] Loading ExitCalibrationModule checkpoint from: {args.adapter_checkpoint}")
         try:
             adapter = ExitCalibrationModule.load_checkpoint(args.adapter_checkpoint, device=device)
-            print(f"✓ Loaded adapter successfully (candidate depths: {adapter.candidate_depths}, rank: {adapter.rank})")
+            print(f"[OK] Loaded adapter successfully (candidate depths: {adapter.candidate_depths}, rank: {adapter.rank})")
         except Exception as e:
             print(f"[!] Warning: Failed to load adapter checkpoint: {e}")
 
     # 2. Load Evaluation Token Stream
     print("[*] Preparing evaluation tokens (WikiText-2)...")
     all_tokens = load_eval_tokens(engine.tokenizer, dataset_name="wikitext2")
-    print(f"✓ Loaded {len(all_tokens):,} evaluation tokens.")
+    print(f"[OK] Loaded {len(all_tokens):,} evaluation tokens.")
 
     # 3. Task 1: Standardized Table I Disentanglement Matrix with Bootstrap CIs
     if not args.skip_table1:
