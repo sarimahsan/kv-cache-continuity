@@ -72,7 +72,8 @@ CANONICAL_DOMAIN_TEXTS = {
 def parse_args():
     parser = argparse.ArgumentParser(description="Entropy-Matched Domain Comparison (A11)")
     parser.add_argument("--model-id", type=str, default="Qwen/Qwen2.5-3B")
-    parser.add_argument("--depth", type=int, default=18, help="Exit depth (default: 18 = 50% on Qwen)")
+    parser.add_argument("--depth", type=int, default=18, help="Single exit depth")
+    parser.add_argument("--depths", type=str, default=None, help="Comma-separated exit depths (e.g. '18,24')")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output-dir", type=str, default="results/canonical_sweeps/entropy_domain")
     parser.add_argument("--quick", action="store_true", help="Quick smoke test")
@@ -163,43 +164,51 @@ def main():
     ]
 
     out_csv = os.path.join(args.output_dir, f"entropy_matched_domain_{args.model_id.replace('/', '_')}.csv")
+    if args.depths is not None:
+        target_depths = [int(d.strip()) for d in args.depths.split(",") if d.strip()]
+    else:
+        target_depths = [args.depth]
+
+    out_csv = os.path.join(args.output_dir, f"entropy_domain_comparison_{args.model_id.replace('/', '_')}.csv")
     rows = []
 
-    print(f"\nExit Depth: L={args.depth}")
-    print(f"{'Domain':<16} | {'Entropy Bin':<25} | {'Mean Entropy':<14} | {'Mean KL (nats)':<15} | {'Token Count':<12}")
-    print("-" * 88)
+    for depth in target_depths:
+        print(f"\n================================================================================")
+        print(f"Exit Depth: L={depth}")
+        print(f"{'Domain':<16} | {'Entropy Bin':<25} | {'Mean Entropy':<14} | {'Mean KL (nats)':<15} | {'Token Count':<12}")
+        print("-" * 88)
 
-    for domain_name, texts in CANONICAL_DOMAIN_TEXTS.items():
-        sample_texts = texts[:1] if args.quick else texts
-        entropies, kls = harvest_token_entropies_and_kl(
-            engine=engine,
-            text_list=sample_texts,
-            depth=args.depth,
-            device=device,
-        )
+        for domain_name, texts in CANONICAL_DOMAIN_TEXTS.items():
+            sample_texts = texts[:1] if args.quick else texts
+            entropies, kls = harvest_token_entropies_and_kl(
+                engine=engine,
+                text_list=sample_texts,
+                depth=depth,
+                device=device,
+            )
 
-        for bin_label, low, high in bins:
-            mask = (entropies >= low) & (entropies < high)
-            if mask.sum() > 0:
-                bin_ent = float(np.mean(entropies[mask]))
-                bin_kl = float(np.mean(kls[mask]))
-                count = int(mask.sum())
-            else:
-                bin_ent = 0.0
-                bin_kl = 0.0
-                count = 0
+            for bin_label, low, high in bins:
+                mask = (entropies >= low) & (entropies < high)
+                if mask.sum() > 0:
+                    bin_ent = float(np.mean(entropies[mask]))
+                    bin_kl = float(np.mean(kls[mask]))
+                    count = int(mask.sum())
+                else:
+                    bin_ent = 0.0
+                    bin_kl = 0.0
+                    count = 0
 
-            print(f"{domain_name:<16} | {bin_label:<25} | {bin_ent:14.3f} | {bin_kl:15.4f} | {count:12}")
+                print(f"{domain_name:<16} | {bin_label:<25} | {bin_ent:14.3f} | {bin_kl:15.4f} | {count:12}")
 
-            rows.append({
-                "model_id": args.model_id,
-                "exit_depth": args.depth,
-                "domain": domain_name,
-                "entropy_bin": bin_label,
-                "mean_entropy": round(bin_ent, 3),
-                "mean_kl": round(bin_kl, 4),
-                "token_count": count,
-            })
+                rows.append({
+                    "model_id": args.model_id,
+                    "exit_depth": depth,
+                    "domain": domain_name,
+                    "entropy_bin": bin_label,
+                    "mean_entropy": round(bin_ent, 3),
+                    "mean_kl": round(bin_kl, 4),
+                    "token_count": count,
+                })
 
     fieldnames = ["model_id", "exit_depth", "domain", "entropy_bin", "mean_entropy", "mean_kl", "token_count"]
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
