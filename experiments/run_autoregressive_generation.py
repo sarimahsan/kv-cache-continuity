@@ -58,6 +58,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate Autoregressive Non-Teacher-Forced Generation (A3)")
     parser.add_argument("--model-id", type=str, default="Qwen/Qwen2.5-3B")
     parser.add_argument("--depths", type=str, default=None, help="Comma-separated exit depths (e.g. '18,24,30')")
+    parser.add_argument("--num-samples", type=int, default=None, help="Number of prompts to evaluate (defaults to all canonical prompts)")
     parser.add_argument("--max-new-tokens", type=int, default=256, help="Maximum generated tokens (64, 128, 256)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
@@ -172,8 +173,12 @@ def main():
         L = engine.num_layers
         depths = [int(round(0.50 * L)), int(round(0.67 * L)), int(round(0.83 * L))]
 
-    prompts = CANONICAL_EVAL_PROMPTS[:2] if args.quick else CANONICAL_EVAL_PROMPTS
-    max_tokens = 64 if args.quick else args.max_new_tokens
+    prompts = CANONICAL_EVAL_PROMPTS
+    if args.quick:
+        prompts = prompts[:2]
+    elif args.num_samples is not None:
+        prompts = prompts[:args.num_samples]
+    max_tokens = 16 if args.quick else args.max_new_tokens
 
     policies = [
         ("native_projection", "Native Projection"),
