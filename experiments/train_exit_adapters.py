@@ -399,7 +399,6 @@ def main():
         )
 
         optimizer.zero_grad()
-        total_loss = 0.0
         kd_losses = []
         ce_losses = []
 
@@ -418,17 +417,22 @@ def main():
                 log_p_stud = F.log_softmax((student_logits / t_temp).float(), dim=-1)
                 loss_kd = F.kl_div(log_p_stud, p_teach, reduction="batchmean") * (t_temp ** 2)
                 loss_layer = (1.0 - args.distill_alpha) * loss_ce + args.distill_alpha * loss_kd
+                del p_teach, log_p_stud
             else:
                 loss_kd = torch.tensor(0.0, device=device)
                 loss_layer = loss_ce
 
-            total_loss = total_loss + loss_layer
             ce_losses.append(loss_ce.item())
             kd_losses.append(loss_kd.item())
 
-        total_loss.backward()
+            # Backward immediately per depth to release logits & computation graph from VRAM
+            (loss_layer / len(candidate_depths)).backward()
+            del student_logits, h_calibrated, loss_layer
+
         nn.utils.clip_grad_norm_(calibration_module.parameters(), max_norm=1.0)
         optimizer.step()
+        del saved_states, terminal_h, teacher_logits
+        torch.cuda.empty_cache()
 
         # Validation evaluation at intervals
         if step % args.eval_every == 0 or step == args.steps:
