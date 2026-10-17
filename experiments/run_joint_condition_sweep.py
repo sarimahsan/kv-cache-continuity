@@ -176,16 +176,19 @@ def main():
         print(f"[*] Loading ExitCalibrationModule checkpoint from: {args.adapter_path}")
         try:
             ckpt = torch.load(args.adapter_path, map_location=device)
-            # Try to restore adapter module
+            cand_depths = ckpt.get("candidate_depths", [18, 22, 24, 30])
+            rank = ckpt.get("rank", 512)
+            adapter_type = ckpt.get("adapter_type", "mlp")
             adapter = ExitCalibrationModule(
                 d_model=engine.config.hidden_size,
-                candidate_depths=[18, 24, 29, 30],
-                adapter_type="mlp",
-                rank=512,
+                candidate_depths=cand_depths,
+                adapter_type=adapter_type,
+                rank=rank,
             ).to(device)
-            adapter.load_state_dict(ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt)
+            state_dict = ckpt["state_dict"] if "state_dict" in ckpt else (ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt)
+            adapter.load_state_dict(state_dict)
             adapter.eval()
-            print("[OK] Exit adapter loaded successfully.")
+            print(f"[OK] Exit adapter loaded successfully for depths {cand_depths}.")
         except Exception as e:
             print(f"[!] Warning: Could not instantiate adapter: {e}. Evaluating with uncalibrated intermediate state.")
             adapter = None
