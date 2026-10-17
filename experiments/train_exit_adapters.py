@@ -100,6 +100,8 @@ def parse_args():
     )
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output-dir", type=str, default="checkpoints", help="Directory to save adapter weights")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint (.pt) to resume training from")
+    parser.add_argument("--resume-step", type=int, default=None, help="Step number to resume from (overrides step saved in checkpoint)")
     return parser.parse_args()
 
 
@@ -355,6 +357,33 @@ def main():
         betas=(0.9, 0.98)
     )
 
+    start_step = 0
+    if args.resume:
+        if not os.path.exists(args.resume):
+            raise FileNotFoundError(f"Checkpoint file not found: {args.resume}")
+        print(f"[*] Resuming from checkpoint: {args.resume}")
+        ckpt_data = torch.load(args.resume, map_location=device)
+        if isinstance(ckpt_data, dict) and "state_dict" in ckpt_data:
+            calibration_module.load_state_dict(ckpt_data["state_dict"])
+            if "step" in ckpt_data and args.resume_step is None:
+                start_step = int(ckpt_data["step"])
+            if "optimizer_state_dict" in ckpt_data:
+                try:
+                    optimizer.load_state_dict(ckpt_data["optimizer_state_dict"])
+                    print("✓ Optimizer state successfully restored.")
+                except Exception as e:
+                    print(f"[!] Warning: Could not restore optimizer state ({e}). Using fresh optimizer.")
+        elif isinstance(ckpt_data, dict):
+            # Might be raw state dict
+            calibration_module.load_state_dict(ckpt_data)
+        else:
+            raise ValueError(f"Unrecognized checkpoint format in {args.resume}")
+
+        if args.resume_step is not None:
+            start_step = args.resume_step
+
+        print(f"✓ Resuming training starting at step {start_step + 1} (target total steps: {args.steps}).")
+
     def get_lr(step: int) -> float:
         if step < args.warmup_steps:
             return args.lr * (step / max(1, args.warmup_steps))
@@ -385,7 +414,7 @@ def main():
     print(f"{'Step':<7} | {'LR':<9} | {'Train Loss':<11} | {'Mean KD':<10} | {'Val PPL (L18)':<14} | {'Val KL':<10} | {'Val Top-1':<11} | {'Elapsed':<8}")
     print("-" * 115)
 
-    for step in range(1, args.steps + 1):
+    for step in range(start_step + 1, args.steps + 1):
         # Update learning rate
         curr_lr = get_lr(step)
         for pg in optimizer.param_groups:
@@ -483,12 +512,28 @@ def main():
             if primary_val["val_top1"] > best_val_top1:
                 best_val_top1 = primary_val["val_top1"]
                 best_ckpt_path = os.path.join(args.output_dir, f"best_exit_adapters_{args.model_type}_{args.adapter_type}_r{args.rank}.pt")
-                calibration_module.save_checkpoint(best_ckpt_path)
+                torch.save({
+                    "d_model": calibration_module.d_model,
+                    "candidate_depths": calibration_module.candidate_depths,
+                    "adapter_type": calibration_module.adapter_type,
+                    "rank": calibration_module.rank,
+                    "state_dict": calibration_module.state_dict(),
+                    "step": step,
+                    "optimizer_state_dict": optimizer.state_dict()
+                }, best_ckpt_path)
                 print(f"[+] Saved new best validation checkpoint ({best_val_top1:.2f}% top-1) to: {best_ckpt_path}", flush=True)
 
     # 6. Save final checkpoint and training curve CSV
     final_ckpt_path = os.path.join(args.output_dir, f"final_exit_adapters_{args.model_type}_{args.adapter_type}_r{args.rank}.pt")
-    calibration_module.save_checkpoint(final_ckpt_path)
+    torch.save({
+        "d_model": calibration_module.d_model,
+        "candidate_depths": calibration_module.candidate_depths,
+        "adapter_type": calibration_module.adapter_type,
+        "rank": calibration_module.rank,
+        "state_dict": calibration_module.state_dict(),
+        "step": args.steps,
+        "optimizer_state_dict": optimizer.state_dict()
+    }, final_ckpt_path)
     print(f"\n[+] Saved final adapter checkpoint to: {final_ckpt_path}")
     if best_val_top1 > 0:
         print(f"[+] Best validation checkpoint achieved: {best_val_top1:.2f}% top-1 agreement.")
