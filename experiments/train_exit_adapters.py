@@ -364,7 +364,17 @@ def main():
         print(f"[*] Resuming from checkpoint: {args.resume}")
         ckpt_data = torch.load(args.resume, map_location=device)
         if isinstance(ckpt_data, dict) and "state_dict" in ckpt_data:
-            calibration_module.load_state_dict(ckpt_data["state_dict"])
+            # Check if saved candidate_depths differs from CLI argument
+            saved_depths = ckpt_data.get("candidate_depths", None)
+            if saved_depths and set(saved_depths) != set(candidate_depths):
+                print(f"[*] Note: Checkpoint contains depths {saved_depths}, while CLI requested {candidate_depths}.")
+
+            missing, unexpected = calibration_module.load_state_dict(ckpt_data["state_dict"], strict=False)
+            if unexpected:
+                print(f"[!] Warning: Ignoring unexpected keys in checkpoint (e.g. depths not in candidate list): {unexpected}")
+            if missing:
+                print(f"[!] Warning: Missing keys in checkpoint (initialized from scratch): {missing}")
+
             if "step" in ckpt_data and args.resume_step is None:
                 start_step = int(ckpt_data["step"])
             if "optimizer_state_dict" in ckpt_data:
@@ -375,7 +385,11 @@ def main():
                     print(f"[!] Warning: Could not restore optimizer state ({e}). Using fresh optimizer.")
         elif isinstance(ckpt_data, dict):
             # Might be raw state dict
-            calibration_module.load_state_dict(ckpt_data)
+            missing, unexpected = calibration_module.load_state_dict(ckpt_data, strict=False)
+            if unexpected:
+                print(f"[!] Warning: Ignoring unexpected keys: {unexpected}")
+            if missing:
+                print(f"[!] Warning: Missing keys: {missing}")
         else:
             raise ValueError(f"Unrecognized checkpoint format in {args.resume}")
 
