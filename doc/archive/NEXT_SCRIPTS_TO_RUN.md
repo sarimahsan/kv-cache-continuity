@@ -1,0 +1,6 @@
+# Post-Reproducibility Execution Plan
+
+* **Multi-Domain Speculative Decoding Benchmark** ([`experiments/benchmark_large_scale.py`](file:///e:/CUDA-Graph/kv_continuity/experiments/benchmark_large_scale.py)): Measures multi-domain self-speculative speedup, acceptance rate $\alpha$, and $95\%$ confidence intervals ($N=60$) for **Table 2**.
+* **Speculative Horizon Scaling & Lossless Verification** ([`experiments/benchmark_speculative_decoding.py`](file:///e:/CUDA-Graph/kv_continuity/experiments/benchmark_speculative_decoding.py)): Verifies $100\%$ lossless token equivalence against the 36-layer oracle and evaluates multi-token drafting at $\gamma=2$.
+* **Continuous Depth Sweep Curve** ([`experiments/isolate_kv_ablation.py`](file:///e:/CUDA-Graph/kv_continuity/experiments/isolate_kv_ablation.py)): Generates the continuous 11-depth KL divergence and perplexity phase transition curve ($L=6 \dots 34$) for **Figure 2**.
+* **LLaMA-3.2 Cross-Architecture Verification** ([`experiments/isolate_kv_ablation.py`](file:///e:/CUDA-Graph/kv_continuity/experiments/isolate_kv_ablation.py)): Proves cross-architecture invariance of Native Projection and Key-stability on LLaMA architecture ($L=8 \dots 14$) for **Table 3**.

@@ -1,0 +1,38 @@
+[
+  {
+    "exit_depth": 18,
+    "strategy": "oracle_full",
+    "condition_name": "Oracle (K*, V*)",
+    "ppl": 23.25693486944715,
+    "kl_nats": -0.00024404874436123662,
+    "top1_acc": 100.0,
+    "loss": 3.146603361513249
+  },
+  {
+    "exit_depth": 18,
+    "strategy": "proj_k_oracle_v",
+    "condition_name": "Projected K + Oracle V",
+    "ppl": 28.019107298913877,
+    "kl_nats": 0.15976674645035355,
+    "top1_acc": 81.48148148148148,
+    "loss": 3.3328866809764235
+  },
+  {
+    "exit_depth": 18,
+    "strategy": "oracle_k_proj_v",
+    "condition_name": "Oracle K + Projected V",
+    "ppl": 42.67774142288508,
+    "kl_nats": 0.5726812302120148,
+    "top1_acc": 62.01058201058201,
+    "loss": 3.753677506169314
+  },
+  {
+    "exit_depth": 18,
+    "strategy": "native_projection",
+    "condition_name": "Native Proj (K_proj, V_proj)",
+    "ppl": 59.94114233901469,
+    "kl_nats": 0.9242557298569453,
+    "top1_acc": 58.62433862433862,
+    "loss": 4.093363119748535
+  }
+]

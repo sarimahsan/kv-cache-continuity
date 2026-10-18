@@ -1,0 +1,6 @@
+layer,count,pct,mean_surprisal_bits,std_surprisal_bits,median_surprisal_bits,shuffled_mean_bits,shuffled_std_bits,delta_bits,top_category,top_category_pct
+4,370328,49.7282,1.9992,3.0316,0.5786,2.7041,0.004,-0.7049,General/Word,42.84
+6,89708,12.0461,2.7601,3.2729,1.5029,2.7073,0.0108,0.0528,General/Word,50.73
+8,82988,11.1438,3.0532,3.3007,1.9291,2.6974,0.0078,0.3557,General/Word,55.07
+10,78140,10.4928,3.3502,3.3708,2.3038,2.7052,0.0121,0.645,General/Word,59.59
+12,123540,16.5891,4.1327,3.4484,3.0625,2.7048,0.0051,1.4278,General/Word,67.02

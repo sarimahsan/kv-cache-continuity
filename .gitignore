@@ -1,5 +1,5 @@
 # ==============================================================================
-# Git Ignore Configuration: kv_continuity (Speculative Decoding & KV Continuity)
+# Git Ignore Configuration: kv-cache-continuity
 # ==============================================================================
 
 # Python bytecode & cache
@@ -23,17 +23,17 @@ env/
 .idea/
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Large base model weights (do NOT push huge foundation model weights > 100MB)
+# Manuscript folder (keep local, do not push)
+manuscript/
+
+# Large foundation model weights (> 100MB)
 *.safetensors
 *.bin
 *.ckpt
 *.onnx
 base_model.pt
-
-# Allow exit adapter checkpoints (<15MB) while ignoring large weights
-checkpoints/
-*.pt
 
 # Training logs & tracking
 runs/
@@ -41,17 +41,20 @@ wandb/
 tensorboard/
 *.log
 
-# Documentation & Paper writeups
-doc/
-docs/
-paper_table_*.md
 
-# Results & Data outputs
-results/
-*.json
-*.csv
-
-
-
-/manuscript/
-/t.md
+# LaTeX build artifacts & temporary files
+*.aux
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.synctex(busy)
+*.out
+*.toc
+*.nav
+*.snm
+*.vrb
+*.bak
+*.swp
+*~
