@@ -27,26 +27,76 @@ if REPO_ROOT not in sys.path:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Colab Execution Driver for Part A and Part B")
+    parser = argparse.ArgumentParser(description="Unified Colab Execution Driver")
     parser.add_argument("--model-id", type=str, default="Qwen/Qwen2.5-3B", help="Model ID")
     parser.add_argument("--device", type=str, default="cuda", help="Execution device")
     parser.add_argument("--quick", action="store_true", help="Quick mode for rapid smoke testing")
-    parser.add_argument("--skip-part-a", action="store_true", help="Skip Part A (Length and Domain benchmark)")
-    parser.add_argument("--skip-part-b", action="store_true", help="Skip Part B (Multi-depth adapter sweep)")
+    parser.add_argument("--run-joint", action="store_true", default=True, help="Run dynamic mixed-exit joint condition sweep")
+    parser.add_argument("--run-rollout", action="store_true", default=True, help="Run 64-prompt autoregressive rollout with CIs")
+    parser.add_argument("--run-length-domain", action="store_true", help="Run Length and Domain generality benchmark")
+    parser.add_argument("--run-adapter-sweep", action="store_true", help="Run Multi-depth adapter sweep")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     print("=" * 80)
-    print("UNIFIED COLAB REPRODUCIBILITY DRIVER: PART A & PART B")
+    print("UNIFIED COLAB REPRODUCIBILITY DRIVER: KV CONTINUITY SUITE")
     print(f"Model: {args.model_id} | Device: {args.device} | Quick Mode: {args.quick}")
     print("=" * 80)
 
-    # 1. Run Part A
-    if not args.skip_part_a:
+    # 1. Run Dynamic Mixed-Exit Joint Sweep
+    if args.run_joint:
         print("\n" + "#" * 80)
-        print("LAUNCHING PART A: SEQUENCE LENGTH & DOMAIN GENERALITY BENCHMARK")
+        print("LAUNCHING BENCHMARK 1: DYNAMIC MIXED-EXIT JOINT DECOMPOSITION")
+        print("#" * 80)
+        cmd_joint = [
+            sys.executable,
+            os.path.join(REPO_ROOT, "experiments", "run_joint_condition_sweep.py"),
+            "--model-id", args.model_id,
+            "--device", args.device,
+            "--exit-policy", "mixed_50",
+            "--depths", "18,22,24,30",
+        ]
+        if args.quick:
+            cmd_joint.append("--quick")
+        t0 = time.perf_counter()
+        ret_j = subprocess.run(cmd_joint)
+        t_j = time.perf_counter() - t0
+        if ret_j.returncode != 0:
+            print(f"[!] Error: Joint sweep failed with return code {ret_j.returncode}")
+        else:
+            print(f"✓ Mixed-exit joint sweep completed in {t_j / 60:.1f} minutes.")
+
+    # 2. Run 64-Prompt Autoregressive Rollout with Bootstrap CIs
+    if args.run_rollout:
+        print("\n" + "#" * 80)
+        print("LAUNCHING BENCHMARK 2: AUTOREGRESSIVE ROLLOUT WITH BOOTSTRAP CIS")
+        print("#" * 80)
+        cmd_roll = [
+            sys.executable,
+            os.path.join(REPO_ROOT, "experiments", "run_autoregressive_generation.py"),
+            "--model-id", args.model_id,
+            "--device", args.device,
+            "--depths", "18,24,30",
+            "--prompt-prefill", "oracle",
+        ]
+        if args.quick:
+            cmd_roll.extend(["--quick", "--num-prompts", "4"])
+        else:
+            cmd_roll.extend(["--num-prompts", "64", "--max-new-tokens", "256"])
+        t0 = time.perf_counter()
+        ret_r = subprocess.run(cmd_roll)
+        t_r = time.perf_counter() - t0
+        if ret_r.returncode != 0:
+            print(f"[!] Error: Rollout benchmark failed with return code {ret_r.returncode}")
+        else:
+            print(f"✓ Autoregressive rollout benchmark completed in {t_r / 60:.1f} minutes.")
+
+    # 3. Optional: Run Length & Domain
+    if args.run_length_domain:
+        print("\n" + "#" * 80)
+        print("LAUNCHING BENCHMARK 3: SEQUENCE LENGTH & DOMAIN GENERALITY")
         print("#" * 80)
         cmd_a = [
             sys.executable,
@@ -58,49 +108,14 @@ def main():
             cmd_a.append("--quick")
         else:
             cmd_a.extend(["--seq-lens", "64,128,256,512", "--num-samples", "25"])
-
-        t0 = time.perf_counter()
-        ret_a = subprocess.run(cmd_a)
-        t_a = time.perf_counter() - t0
-        if ret_a.returncode != 0:
-            print(f"[!] Error: Part A failed with return code {ret_a.returncode}")
-        else:
-            print(f"✓ Part A completed successfully in {t_a / 60:.1f} minutes.")
-
-    # 2. Run Part B
-    if not args.skip_part_b:
-        print("\n" + "#" * 80)
-        print("LAUNCHING PART B: MULTI-DEPTH ADAPTER READOUT CHARACTERIZATION")
-        print("#" * 80)
-        cmd_b = [
-            sys.executable,
-            os.path.join(REPO_ROOT, "experiments", "sweep_adapter_depths.py"),
-            "--model-id", args.model_id,
-            "--device", args.device,
-        ]
-        if args.quick:
-            cmd_b.append("--quick")
-        else:
-            cmd_b.extend(["--depths", "18,22,24,28,32", "--rank", "512", "--steps", "500", "--num-val-samples", "20"])
-
-        t0 = time.perf_counter()
-        ret_b = subprocess.run(cmd_b)
-        t_b = time.perf_counter() - t0
-        if ret_b.returncode != 0:
-            print(f"[!] Error: Part B failed with return code {ret_b.returncode}")
-        else:
-            print(f"✓ Part B completed successfully in {t_b / 60:.1f} minutes.")
+        subprocess.run(cmd_a)
 
     print("\n" + "=" * 80)
     print("ALL REQUESTED BENCHMARKS FINISHED.")
-    print("Generated result files:")
-    print("  - Part A CSV: results/canonical_sweeps/qwen2.5_3b/length_and_domain_sweep.csv")
-    print("  - Part A Markdown: results/canonical_sweeps/qwen2.5_3b/paper_table_length_and_domain.md")
-    print("  - Part B CSV: results/canonical_sweeps/qwen2.5_3b/multi_depth_adapter_sweep.csv")
-    print("  - Part B Markdown: results/canonical_sweeps/qwen2.5_3b/paper_table_multi_depth_adapters.md")
-    print("  - Part B Adapter Checkpoint: checkpoints/multi_depth_adapters_qwen.pt")
+    print("Results are saved under results/canonical_sweeps/")
     print("=" * 80)
 
 
 if __name__ == "__main__":
     main()
+
