@@ -345,8 +345,12 @@ class Data:
                 self.eval[dom] = torch.randint(0, vocab, (args.eval_n, T), generator=g)
             return
         from datasets import load_dataset
-        tr = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-        va = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
+        try:
+            tr = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
+            va = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="validation")
+        except Exception:
+            tr = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+            va = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
         enc = lambda txt: torch.tensor(tok(txt, add_special_tokens=False)["input_ids"])
         self.train = enc("\n\n".join(x for x in tr["text"] if x.strip()))
         self.eval["wikitext"] = self._chunks(enc("\n\n".join(x for x in va["text"] if x.strip())), T, args.eval_n, rng)

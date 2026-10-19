@@ -179,11 +179,18 @@ def sample_prompts(tokenizer, num_prompts: int, seed: int = 42) -> List[str]:
     rng = np.random.RandomState(seed)
     try:
         from datasets import load_dataset
-        ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
-        lines = [line.strip() for line in ds["text"] if len(line.strip().split()) >= 15]
-        if len(lines) >= num_prompts:
-            chosen = rng.choice(lines, size=num_prompts, replace=False).tolist()
-            return chosen
+        ds = None
+        for repo_id in ["Salesforce/wikitext", "wikitext"]:
+            try:
+                ds = load_dataset(repo_id, "wikitext-2-raw-v1", split="validation")
+                break
+            except Exception:
+                continue
+        if ds is not None:
+            lines = [line.strip() for line in ds["text"] if len(line.strip().split()) >= 15]
+            if len(lines) >= num_prompts:
+                chosen = rng.choice(lines, size=num_prompts, replace=False).tolist()
+                return chosen
     except Exception:
         pass
 
