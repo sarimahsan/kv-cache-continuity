@@ -28,6 +28,11 @@ desktop.ini
 # Manuscript folder (keep local, do not push)
 manuscript/
 
+# Local scripts with tokens
+r.py
+check_traffic.py
+
+
 # Large foundation model weights (> 100MB)
 *.safetensors
 *.bin
