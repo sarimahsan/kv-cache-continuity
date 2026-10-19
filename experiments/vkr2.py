@@ -2,6 +2,8 @@
 """
 vkr2.py -- KV repair for depth-adaptive Transformers, v2 (single file).
 
+Supported architectures: Qwen2 family, Llama family (including Llama-3.2-1B).
+
 Changes vs vkr.py
   * Reuses existing adapters (adept_hsm_L*.pt, vkr_L*.pt) from --ckpt_dir; trains only what is missing.
   * NEW method `kvc`: per-layer corrector for BOTH Keys and Values (parameter-matched to vkr).
@@ -10,8 +12,13 @@ Changes vs vkr.py
   * Dropped the misleading "gap closed %"; reports KL reduction vs native and the Value share of
     the Key/Value error instead. oracleK / oracleV are diagnostics, NOT ceilings.
 
-Typical Kaggle command (adapters from the first run are picked up automatically):
+Typical Kaggle commands (adapters from the first run are picked up automatically):
+  # Qwen2.5-3B (36 layers): exit at layers 18, 24, 30
   python experiments/vkr2.py --model Qwen/Qwen2.5-3B --depths 18,24,30 --eval_n 120 \
+      --ckpt_dir /kaggle/working/kv-cache-continuity/vkr_out
+
+  # Llama-3.2-1B (16 layers): exit at layers 8, 10, 12
+  python experiments/vkr2.py --model meta-llama/Llama-3.2-1B --depths 8,10,12 --eval_n 120 \
       --ckpt_dir /kaggle/working/kv-cache-continuity/vkr_out
 
 Other modes
@@ -82,9 +89,16 @@ class Ctx:
         self.d = cfg.hidden_size
         self.rep = self.H // self.Hkv
         self.kvdim = self.Hkv * self.D
+        # rotary_emb lives on model.model in Qwen2/recent Llama, or on each
+        # self_attn layer in older transformers versions of Llama
         self.rotary = getattr(model.model, "rotary_emb", None)
         if self.rotary is None:
-            raise RuntimeError("model.model.rotary_emb not found; need transformers >= 4.48")
+            # Fallback: try to grab it from the first layer's self_attn
+            self.rotary = getattr(self.layers[0].self_attn, "rotary_emb", None)
+        if self.rotary is None:
+            raise RuntimeError(
+                "rotary_emb not found on model.model or layers[0].self_attn; "
+                "need transformers >= 4.48")
         self.dtype = next(model.parameters()).dtype
 
     def embed(self, ids):
@@ -481,11 +495,20 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() and not args.selftest else "cpu")
 
     if args.selftest:
-        from transformers import Qwen2Config, Qwen2ForCausalLM
-        cfg = Qwen2Config(vocab_size=512, hidden_size=128, intermediate_size=256, num_hidden_layers=8,
-                          num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=512,
-                          rope_theta=10000.0, tie_word_embeddings=False)
-        model = Qwen2ForCausalLM(cfg).float().eval()
+        # Support both Qwen2 and Llama selftest variants
+        is_llama_selftest = "llama" in args.model.lower()
+        if is_llama_selftest:
+            from transformers import LlamaConfig, LlamaForCausalLM
+            cfg = LlamaConfig(vocab_size=512, hidden_size=128, intermediate_size=256, num_hidden_layers=8,
+                              num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=512,
+                              rope_theta=10000.0, tie_word_embeddings=False)
+            model = LlamaForCausalLM(cfg).float().eval()
+        else:
+            from transformers import Qwen2Config, Qwen2ForCausalLM
+            cfg = Qwen2Config(vocab_size=512, hidden_size=128, intermediate_size=256, num_hidden_layers=8,
+                              num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=512,
+                              rope_theta=10000.0, tie_word_embeddings=False)
+            model = Qwen2ForCausalLM(cfg).float().eval()
         tok = None
         if args.depths == "18,24,30":
             args.depths = "0.5,0.75"
@@ -510,7 +533,8 @@ def main():
     model.to(device)
 
     ctx = Ctx(model)
-    print(f"model={args.model if not args.selftest else 'tiny-random-qwen2'} layers={ctx.N} d={ctx.d} "
+    selftest_label = ('tiny-random-llama' if 'llama' in args.model.lower() else 'tiny-random-qwen2') if args.selftest else None
+    print(f"model={selftest_label or args.model} layers={ctx.N} d={ctx.d} "
           f"H={ctx.H} Hkv={ctx.Hkv} D={ctx.D} dtype={ctx.dtype} device={device}")
     depths = []
     for x in args.depths.split(","):
