@@ -489,6 +489,9 @@ def rollout_metrics(ref, gen, k):
 def main():
     args = parse_args()
     set_seed(args.seed)
+    # Default output dir: "llamavkrout" for Llama models, "vkr_out" for others
+    if args.out == "vkr_out" and "llama" in args.model.lower():
+        args.out = "llamavkrout"
     ckpt_dir = args.ckpt_dir or args.out
     os.makedirs(args.out, exist_ok=True)
     os.makedirs(ckpt_dir, exist_ok=True)
