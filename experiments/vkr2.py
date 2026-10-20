@@ -2,8 +2,6 @@
 """
 vkr2.py -- KV repair for depth-adaptive Transformers, v2 (single file).
 
-Supported architectures: Qwen2 family, Llama family (including Llama-3.2-1B).
-
 Changes vs vkr.py
   * Reuses existing adapters (adept_hsm_L*.pt, vkr_L*.pt) from --ckpt_dir; trains only what is missing.
   * NEW method `kvc`: per-layer corrector for BOTH Keys and Values (parameter-matched to vkr).
@@ -12,13 +10,8 @@ Changes vs vkr.py
   * Dropped the misleading "gap closed %"; reports KL reduction vs native and the Value share of
     the Key/Value error instead. oracleK / oracleV are diagnostics, NOT ceilings.
 
-Typical Kaggle commands (adapters from the first run are picked up automatically):
-  # Qwen2.5-3B (36 layers): exit at layers 18, 24, 30
+Typical Kaggle command (adapters from the first run are picked up automatically):
   python experiments/vkr2.py --model Qwen/Qwen2.5-3B --depths 18,24,30 --eval_n 120 \
-      --ckpt_dir /kaggle/working/kv-cache-continuity/vkr_out
-
-  # Llama-3.2-1B (16 layers): exit at layers 8, 10, 12
-  python experiments/vkr2.py --model meta-llama/Llama-3.2-1B --depths 8,10,12 --eval_n 120 \
       --ckpt_dir /kaggle/working/kv-cache-continuity/vkr_out
 
 Other modes
@@ -64,6 +57,9 @@ def parse_args():
     p.add_argument("--retrain", action="store_true")
     p.add_argument("--no_c4", action="store_true")
     p.add_argument("--c4_docs", type=int, default=800)
+    p.add_argument("--methods", default="adept_hsm,vkr,kvc",
+                   help="comma list of trainable methods to load/train/eval (any of adept_hsm,vkr,kvc). "
+                        "native/direct/oracle/oracleK/oracleV are always run.")
     p.add_argument("--selftest", action="store_true")
     return p.parse_args()
 
@@ -89,16 +85,9 @@ class Ctx:
         self.d = cfg.hidden_size
         self.rep = self.H // self.Hkv
         self.kvdim = self.Hkv * self.D
-        # rotary_emb lives on model.model in Qwen2/recent Llama, or on each
-        # self_attn layer in older transformers versions of Llama
         self.rotary = getattr(model.model, "rotary_emb", None)
         if self.rotary is None:
-            # Fallback: try to grab it from the first layer's self_attn
-            self.rotary = getattr(self.layers[0].self_attn, "rotary_emb", None)
-        if self.rotary is None:
-            raise RuntimeError(
-                "rotary_emb not found on model.model or layers[0].self_attn; "
-                "need transformers >= 4.48")
+            raise RuntimeError("model.model.rotary_emb not found; need transformers >= 4.48")
         self.dtype = next(model.parameters()).dtype
 
     def embed(self, ids):
@@ -402,7 +391,7 @@ def stream_texts(repo, n_docs, **kw):
 
 class Data:
     def __init__(self, tok, args, vocab, need_train):
-        T, rng = args.seq_len, random.Random(args.seed)
+        T, rng = args.seq_len, random.Random(0)  # eval subset is fixed across seeds
         self.T = T
         self.eval = {}
         self.train = None
@@ -414,15 +403,9 @@ class Data:
             return
         from datasets import load_dataset
         enc = lambda txt: torch.tensor(tok(txt, add_special_tokens=False)["input_ids"])
-        try:
-            va = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="validation")
-        except Exception:
-            va = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
+        va = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
         if need_train:
-            try:
-                tr = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
-            except Exception:
-                tr = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+            tr = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
             self.train = enc("\n\n".join(x for x in tr["text"] if x.strip()))
         self.eval["wikitext"] = self._chunks(enc("\n\n".join(x for x in va["text"] if x.strip())), T, args.eval_n, rng)
         if not args.no_c4:
@@ -482,36 +465,27 @@ def rollout_metrics(ref, gen, k):
         m.append(100 * eq[:k].float().mean().item())
         bad = (~eq).nonzero()
         fd.append(bad[0].item() if len(bad) else len(r))
-    return dict(match=sum(m) / len(m), first_div=sum(fd) / len(fd))
+    return dict(match=sum(m) / len(m), first_div=sum(fd) / len(fd), match_each=m, fd_each=fd)
 
 
 # ----------------------------------------------------------------------------- main
 def main():
     args = parse_args()
     set_seed(args.seed)
-    # Default output dir: "llamavkrout" for Llama models, "vkr_out" for others
-    if args.out == "vkr_out" and "llama" in args.model.lower():
-        args.out = "llamavkrout"
     ckpt_dir = args.ckpt_dir or args.out
+    tag = f"_s{args.seed}" if args.seed else ""        # seed 0 keeps the legacy file names
+    want = [m.strip() for m in args.methods.split(",") if m.strip()]
+    assert want and all(m in ("adept_hsm", "vkr", "kvc") for m in want), f"bad --methods {args.methods}"
     os.makedirs(args.out, exist_ok=True)
     os.makedirs(ckpt_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.selftest else "cpu")
 
     if args.selftest:
-        # Support both Qwen2 and Llama selftest variants
-        is_llama_selftest = "llama" in args.model.lower()
-        if is_llama_selftest:
-            from transformers import LlamaConfig, LlamaForCausalLM
-            cfg = LlamaConfig(vocab_size=512, hidden_size=128, intermediate_size=256, num_hidden_layers=8,
-                              num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=512,
-                              rope_theta=10000.0, tie_word_embeddings=False)
-            model = LlamaForCausalLM(cfg).float().eval()
-        else:
-            from transformers import Qwen2Config, Qwen2ForCausalLM
-            cfg = Qwen2Config(vocab_size=512, hidden_size=128, intermediate_size=256, num_hidden_layers=8,
-                              num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=512,
-                              rope_theta=10000.0, tie_word_embeddings=False)
-            model = Qwen2ForCausalLM(cfg).float().eval()
+        from transformers import Qwen2Config, Qwen2ForCausalLM
+        cfg = Qwen2Config(vocab_size=512, hidden_size=128, intermediate_size=256, num_hidden_layers=8,
+                          num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=512,
+                          rope_theta=10000.0, tie_word_embeddings=False)
+        model = Qwen2ForCausalLM(cfg).float().eval()
         tok = None
         if args.depths == "18,24,30":
             args.depths = "0.5,0.75"
@@ -536,8 +510,7 @@ def main():
     model.to(device)
 
     ctx = Ctx(model)
-    selftest_label = ('tiny-random-llama' if 'llama' in args.model.lower() else 'tiny-random-qwen2') if args.selftest else None
-    print(f"model={selftest_label or args.model} layers={ctx.N} d={ctx.d} "
+    print(f"model={args.model if not args.selftest else 'tiny-random-qwen2'} layers={ctx.N} d={ctx.d} "
           f"H={ctx.H} Hkv={ctx.Hkv} D={ctx.D} dtype={ctx.dtype} device={device}")
     depths = []
     for x in args.depths.split(","):
@@ -573,8 +546,10 @@ def main():
         kvc = KVC(ctx.d, S, kvc_rank(n_params(vkr), ctx.d, S, ctx.kvdim), ctx.kvdim).to(device)
         print(f"  params: VKR={n_params(vkr):,}  ADEPT-HSM={n_params(hsm):,}  KVC={n_params(kvc):,} "
               f"(rank {kvc.down.out_features})")
-        for m in (hsm, vkr, kvc):
-            path = os.path.join(ckpt_dir, f"{m.name}_L{L}.pt")
+        pool = {"adept_hsm": hsm, "vkr": vkr, "kvc": kvc}
+        trainable = {n: pool[n] for n in want}
+        for n, m in trainable.items():
+            path = os.path.join(ckpt_dir, f"{m.name}_L{L}{tag}.pt")
             if os.path.exists(path) and not args.retrain:
                 m.load_state_dict(torch.load(path, map_location=device))
                 print(f"  loaded {path}")
@@ -582,22 +557,23 @@ def main():
                 raise SystemExit(f"--eval_only but checkpoint missing: {path}")
             else:
                 print(f"  training {m.name} (no checkpoint at {path})")
+                set_seed(args.seed * 1000 + L)         # per-(seed, depth) init + batch order
                 train_method(ctx, m, L, data, args, device)
                 torch.save(m.state_dict(), path)
             m.eval()
         methods = {"oracle": None, "direct": Direct(), "native": Native(), "oracleK": OracleK(),
-                   "oracleV": OracleV(), "adept_hsm": hsm, "vkr": vkr, "kvc": kvc}
+                   "oracleV": OracleV(), **trainable}
         results[L] = {}
         for dom, chunks in data.eval.items():
             res = {n: evaluate(ctx, m, L, chunks, args.eval_bs, device) for n, m in methods.items()}
-            base = res["adept_hsm"]["kl_seq"]
+            base = res["adept_hsm"]["kl_seq"] if "adept_hsm" in res else None
             nat = res["native"]["kl"]
             for n, r in res.items():
                 mean, lo, hi = boot_ci(r["kl_seq"], rng)
                 r["kl_ci"] = (lo, hi)
                 r["params"] = n_params(methods[n]) if methods[n] is not None else 0
                 r["kl_red_vs_native"] = 100 * (nat - r["kl"]) / nat if nat > 1e-12 else float("nan")
-                if n in ("vkr", "kvc"):
+                if base is not None and n in ("vkr", "kvc"):
                     d_mean, d_lo, d_hi = boot_ci(r["kl_seq"] - base, rng)
                     r["dkl_vs_hsm"] = (d_mean, d_lo, d_hi)
             ek, ev = res["oracleK"]["kl"], res["oracleV"]["kl"]
@@ -618,13 +594,23 @@ def main():
             refgen = rollout(ctx, None, L, prompts, args.rollout_new, device)
             rollouts[L] = {}
             print(f"  free-running rollout on {dom0} ({len(prompts)} prompts, {args.rollout_new} new tokens)")
-            for n in ("direct", "native", "adept_hsm", "vkr", "kvc"):
+            per = {}
+            for n in ["direct", "native"] + want:
                 gen = rollout(ctx, methods[n], L, prompts, args.rollout_new, device)
-                rm = rollout_metrics(refgen, gen, args.rollout_new)
-                rollouts[L][n] = rm
-                print(f"    {n:10s} Match@{args.rollout_new} {rm['match']:6.2f}%   first-divergence step {rm['first_div']:.1f}")
+                per[n] = rollout_metrics(refgen, gen, args.rollout_new)
+            for n, rm in per.items():
+                mm, lo, hi = boot_ci(rm["match_each"], rng)
+                fm, flo, fhi = boot_ci(rm["fd_each"], rng)
+                out = dict(match=mm, match_ci=(lo, hi), first_div=fm, first_div_ci=(flo, fhi))
+                if "adept_hsm" in per and n in ("vkr", "kvc"):
+                    out["match_vs_hsm"] = boot_ci(np.array(rm["match_each"]) - np.array(per["adept_hsm"]["match_each"]), rng)
+                rollouts[L][n] = out
+                extra = (f"   vs hsm {out['match_vs_hsm'][0]:+.1f} [{out['match_vs_hsm'][1]:+.1f},{out['match_vs_hsm'][2]:+.1f}]"
+                         if "match_vs_hsm" in out else "")
+                print(f"    {n:10s} Match@{args.rollout_new} {mm:6.2f}% [{lo:.1f},{hi:.1f}]  "
+                      f"first-div {fm:.1f} [{flo:.1f},{fhi:.1f}]{extra}")
 
-    with open(os.path.join(args.out, "results_v2.json"), "w") as f:
+    with open(os.path.join(args.out, f"results_v2{tag}.json"), "w") as f:
         json.dump(dict(args=vars(args), results=results, rollouts=rollouts), f, indent=2)
     lines = ["# KV repair results (v2)", "", f"model `{args.model}`, steps={args.train_steps}, rank={args.rank}", ""]
     for L, doms in results.items():
@@ -638,8 +624,8 @@ def main():
                 lines.append(f"| {n} | {r['kl']:.4f} [{r['kl_ci'][0]:.4f}, {r['kl_ci'][1]:.4f}] | {r['top1']:.2f} | "
                              f"{r['ppl']:.2f} | {r['dppl']:.2f} | {r['kl_red_vs_native']:.1f} | {dks} | {r['params']:,} |")
             lines.append("")
-    open(os.path.join(args.out, "results_v2.md"), "w").write("\n".join(lines))
-    print(f"\nDone. Wrote {args.out}/results_v2.json and results_v2.md (adapters in {ckpt_dir}).")
+    open(os.path.join(args.out, f"results_v2{tag}.md"), "w").write("\n".join(lines))
+    print(f"\nDone. Wrote {args.out}/results_v2{tag}.json and results_v2{tag}.md (adapters in {ckpt_dir}).")
     print("dKL vs hsm < 0 with a CI that excludes 0 means that method is significantly better than the ADEPT-style mapper.")
 
 
