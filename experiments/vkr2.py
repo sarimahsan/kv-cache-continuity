@@ -403,9 +403,9 @@ class Data:
             return
         from datasets import load_dataset
         enc = lambda txt: torch.tensor(tok(txt, add_special_tokens=False)["input_ids"])
-        va = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
+        va = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="validation")
         if need_train:
-            tr = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+            tr = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
             self.train = enc("\n\n".join(x for x in tr["text"] if x.strip()))
         self.eval["wikitext"] = self._chunks(enc("\n\n".join(x for x in va["text"] if x.strip())), T, args.eval_n, rng)
         if not args.no_c4:
