@@ -309,11 +309,11 @@ def main():
         n_heads=ctx.H,
         head_dim=ctx.D,
         n_kv_heads=ctx.Hkv
-    ).to(device)
+    ).to(device=device, dtype=ctx.dtype)
     print(f"Refinement Attention Bridge initialized: {n_params(bridge):,} parameters")
 
     # 2. Instantiate Standard MLP Adapter baseline for comparison
-    mlp_adapter = StandardMLPAdapter(d_model=ctx.d).to(device)
+    mlp_adapter = StandardMLPAdapter(d_model=ctx.d).to(device=device, dtype=ctx.dtype)
     print(f"Standard MLP Adapter initialized:        {n_params(mlp_adapter):,} parameters")
 
     # Train Bridge
