@@ -209,7 +209,7 @@ def train_corrector(ctx, module, L, data, args, device):
 
 @torch.no_grad()
 def evaluate_module(ctx, module, L, chunks, bs, device):
-    if module is not None:
+    if module is not None and hasattr(module, "eval"):
         module.eval()
     kl_seq, top1_seq = [], []
 
@@ -251,6 +251,8 @@ def main():
     p.add_argument("--out", default="vkr_sol3_out")
     p.add_argument("--no_c4", action="store_true")
     p.add_argument("--c4_docs", type=int, default=800)
+    p.add_argument("--eval_only", action="store_true", help="Skip training and evaluate checkpoints if present")
+    p.add_argument("--retrain", action="store_true", help="Force retrain even if checkpoints exist")
     p.add_argument("--selftest", action="store_true")
     args = p.parse_args()
 
@@ -293,7 +295,7 @@ def main():
     print(f" Model: {args.model if not args.selftest else 'tiny-random'} | Device: {device}")
     print(f"=======================================================")
 
-    data = Data(tok, args, model.config.vocab_size, need_train=True)
+    data = Data(tok, args, model.config.vocab_size, need_train=not args.eval_only)
 
     # Instantiate modules
     m_full = FullKVC(ctx.d, S, args.rank, ctx.kvdim).to(device)
@@ -306,15 +308,34 @@ def main():
     print(f"  3. Value-Only KVC (V-KVC):    {n_params(m_val):>10,d} parameters  (-{n_params(m_full) - n_params(m_val):,d} params / -50% up-projections)")
     print(f"  4. Key-Only KVC (K-KVC):      {n_params(m_key):>10,d} parameters")
 
-    # Train modules
-    print(f"\n--- Training Full KVC (Keys + Values) ---")
-    train_corrector(ctx, m_full, L, data, args, device)
+    ckpt_full = os.path.join(args.out, f"kvc_full_L{L}.pt")
+    ckpt_val = os.path.join(args.out, f"kvc_val_only_L{L}.pt")
+    ckpt_key = os.path.join(args.out, f"kvc_key_only_L{L}.pt")
 
-    print(f"\n--- Training Value-Only KVC (V-KVC) ---")
-    train_corrector(ctx, m_val, L, data, args, device)
+    # Train or load modules
+    if not args.retrain and os.path.exists(ckpt_full):
+        print(f"Loading cached checkpoint: {ckpt_full}")
+        m_full.load_state_dict(torch.load(ckpt_full, map_location=device))
+    elif not args.eval_only:
+        print(f"\n--- Training Full KVC (Keys + Values) ---")
+        train_corrector(ctx, m_full, L, data, args, device)
+        torch.save(m_full.state_dict(), ckpt_full)
 
-    print(f"\n--- Training Key-Only KVC (K-KVC) Diagnostic Control ---")
-    train_corrector(ctx, m_key, L, data, args, device)
+    if not args.retrain and os.path.exists(ckpt_val):
+        print(f"Loading cached checkpoint: {ckpt_val}")
+        m_val.load_state_dict(torch.load(ckpt_val, map_location=device))
+    elif not args.eval_only:
+        print(f"\n--- Training Value-Only KVC (V-KVC) ---")
+        train_corrector(ctx, m_val, L, data, args, device)
+        torch.save(m_val.state_dict(), ckpt_val)
+
+    if not args.retrain and os.path.exists(ckpt_key):
+        print(f"Loading cached checkpoint: {ckpt_key}")
+        m_key.load_state_dict(torch.load(ckpt_key, map_location=device))
+    elif not args.eval_only:
+        print(f"\n--- Training Key-Only KVC (K-KVC) Diagnostic Control ---")
+        train_corrector(ctx, m_key, L, data, args, device)
+        torch.save(m_key.state_dict(), ckpt_key)
 
     # Evaluate all 4 methods
     methods = {
