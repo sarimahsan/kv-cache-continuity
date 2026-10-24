@@ -83,32 +83,31 @@ class RefinementAttentionBridge(nn.Module):
         """
         B, T, _ = h_L.shape
         orig_dt = h_L.dtype
-        dt = self.q_proj.weight.dtype
 
-        # Ensure inputs match layer projection dtype
-        h_in = h_L.to(dt)
+        # Keep bridge parameters in float32 for GradScaler compatibility on T4
+        h_in = h_L.float()
         q_raw = self.q_proj(self.ln_q(h_in)).view(B, T, self.H, self.D).transpose(1, 2)
 
         # Apply RoPE to Query
         D = self.D
         q1, q2 = q_raw[..., : D // 2], q_raw[..., D // 2 :]
         rot = torch.cat((-q2, q1), dim=-1)
-        cos = cos.to(dt)
-        sin = sin.to(dt)
-        q = q_raw * cos.unsqueeze(1) + rot * sin.unsqueeze(1)
+        cos32 = cos.float()
+        sin32 = sin.float()
+        q = q_raw * cos32.unsqueeze(1) + rot * sin32.unsqueeze(1)
 
-        k_hat, v_hat = kv_top[0].to(dt), kv_top[1].to(dt)
+        k_hat, v_hat = kv_top[0].float(), kv_top[1].float()
         if self.rep > 1:
             k_hat = k_hat.repeat_interleave(self.rep, dim=1)
             v_hat = v_hat.repeat_interleave(self.rep, dim=1)
 
-        # Causal Attention over top projected cache
+        # Causal Attention over top projected cache (computed in FP32)
         scale = self.D ** -0.5
-        scores = torch.matmul(q, k_hat.transpose(-1, -2)).float() * scale
+        scores = torch.matmul(q, k_hat.transpose(-1, -2)) * scale
 
         causal_mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=h_L.device), diagonal=1)
         scores = scores.masked_fill(causal_mask, float("-inf"))
-        attn_weights = torch.softmax(scores, dim=-1).to(dt)
+        attn_weights = torch.softmax(scores, dim=-1)
 
         attn_out = torch.matmul(attn_weights, v_hat)
         attn_out = attn_out.transpose(1, 2).reshape(B, T, self.H * self.D)
@@ -133,9 +132,8 @@ class StandardMLPAdapter(nn.Module):
 
     def forward(self, h_L):
         orig_dt = h_L.dtype
-        dt = self.w1.weight.dtype
-        x = self.ln(h_L.to(dt))
-        return (h_L.to(dt) + self.w2(F.gelu(self.w1(x)))).to(orig_dt)
+        x = self.ln(h_L.float())
+        return (h_L.float() + self.w2(F.gelu(self.w1(x)))).to(orig_dt)
 
 
 # -----------------------------------------------------------------------------
@@ -309,11 +307,11 @@ def main():
         n_heads=ctx.H,
         head_dim=ctx.D,
         n_kv_heads=ctx.Hkv
-    ).to(device=device, dtype=ctx.dtype)
+    ).to(device)
     print(f"Refinement Attention Bridge initialized: {n_params(bridge):,} parameters")
 
     # 2. Instantiate Standard MLP Adapter baseline for comparison
-    mlp_adapter = StandardMLPAdapter(d_model=ctx.d).to(device=device, dtype=ctx.dtype)
+    mlp_adapter = StandardMLPAdapter(d_model=ctx.d).to(device)
     print(f"Standard MLP Adapter initialized:        {n_params(mlp_adapter):,} parameters")
 
     # Train Bridge

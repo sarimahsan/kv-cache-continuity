@@ -81,7 +81,8 @@ class ValueOnlyKVC(nn.Module):
 
     def kv(self, ctx, orc, L):
         h = orc["hs"][L]
-        z0 = self.down(self.ln(h.float()))
+        dt = self.down.weight.dtype
+        z0 = self.down(self.ln(h.to(dt)))
         # Broadcast across skipped layers S: [B, T, S, rank]
         z = F.gelu(z0.unsqueeze(2) + self.emb.weight.unsqueeze(0).unsqueeze(0))
         dV = torch.einsum("btsr,srk->btsk", z, self.up_v)
@@ -89,7 +90,7 @@ class ValueOnlyKVC(nn.Module):
         out = []
         for s, i in enumerate(range(L, ctx.N)):
             # Keys receive NO correction (pure native); Values receive dV
-            out.append(ctx.project_kv(i, h, orc["cos"], orc["sin"], dk=None, dv=dV[:, :, s]))
+            out.append(ctx.project_kv(i, h, orc["cos"], orc["sin"], dk=None, dv=dV[:, :, s].to(h.dtype)))
         return out
 
 
@@ -118,14 +119,15 @@ class KeyOnlyKVC(nn.Module):
 
     def kv(self, ctx, orc, L):
         h = orc["hs"][L]
-        z0 = self.down(self.ln(h.float()))
+        dt = self.down.weight.dtype
+        z0 = self.down(self.ln(h.to(dt)))
         z = F.gelu(z0.unsqueeze(2) + self.emb.weight.unsqueeze(0).unsqueeze(0))
         dK = torch.einsum("btsr,srk->btsk", z, self.up_k)
 
         out = []
         for s, i in enumerate(range(L, ctx.N)):
             # Keys receive dK; Values receive NO correction (pure native)
-            out.append(ctx.project_kv(i, h, orc["cos"], orc["sin"], dk=dK[:, :, s], dv=None))
+            out.append(ctx.project_kv(i, h, orc["cos"], orc["sin"], dk=dK[:, :, s].to(h.dtype), dv=None))
         return out
 
 
@@ -150,14 +152,15 @@ class FullKVC(nn.Module):
 
     def kv(self, ctx, orc, L):
         h = orc["hs"][L]
-        z0 = self.down(self.ln(h.float()))
+        dt = self.down.weight.dtype
+        z0 = self.down(self.ln(h.to(dt)))
         z = F.gelu(z0.unsqueeze(2) + self.emb.weight.unsqueeze(0).unsqueeze(0))
         dK = torch.einsum("btsr,srk->btsk", z, self.up_k)
         dV = torch.einsum("btsr,srk->btsk", z, self.up_v)
 
         out = []
         for s, i in enumerate(range(L, ctx.N)):
-            out.append(ctx.project_kv(i, h, orc["cos"], orc["sin"], dk=dK[:, :, s], dv=dV[:, :, s]))
+            out.append(ctx.project_kv(i, h, orc["cos"], orc["sin"], dk=dK[:, :, s].to(h.dtype), dv=dV[:, :, s].to(h.dtype)))
         return out
 
 

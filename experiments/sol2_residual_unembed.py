@@ -74,7 +74,9 @@ class ResidualLogitAdapter(nn.Module):
         base_logits = ctx.head(h_L)
 
         # 2. Low-rank residual correction
-        delta = self.B(F.gelu(self.A(self.ln(h_L.float())))) * self.scale
+        dt = self.A.weight.dtype
+        x = self.ln(h_L.to(dt))
+        delta = self.B(F.gelu(self.A(x))) * self.scale
         return base_logits + delta.to(base_logits.dtype)
 
 
@@ -100,9 +102,10 @@ class ResidualManifoldAdapter(nn.Module):
         nn.init.zeros_(self.down_proj.weight)
 
     def forward(self, ctx, h_L):
-        x = self.ln(h_L.float())
-        h_adj = h_L + self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x)).to(h_L.dtype)
-        return ctx.head(h_adj)
+        dt = self.gate_proj.weight.dtype
+        x = self.ln(h_L.to(dt))
+        h_adj = h_L.to(dt) + self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        return ctx.head(h_adj.to(h_L.dtype))
 
 
 # -----------------------------------------------------------------------------
