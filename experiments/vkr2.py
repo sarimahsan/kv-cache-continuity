@@ -527,14 +527,13 @@ def main():
             dt = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
         else:
             dt = torch.float32
+        device_map = "cuda" if device.type == "cuda" else None
         try:
-            model = AutoModelForCausalLM.from_pretrained(args.model, dtype=dt)
+            model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dt, device_map=device_map).eval()
         except TypeError:
-            model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dt)
-        model = model.to(device).eval()
+            model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dt).to(device).eval()
     for p in model.parameters():
         p.requires_grad_(False)
-    model.to(device)
 
     ctx = Ctx(model)
     print(f"model={args.model if not args.selftest else 'tiny-random-qwen2'} layers={ctx.N} d={ctx.d} "

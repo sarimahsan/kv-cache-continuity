@@ -82,15 +82,22 @@ class RefinementAttentionBridge(nn.Module):
         cos, sin: rotary position embeddings for query alignment
         """
         B, T, _ = h_L.shape
-        q_raw = self.q_proj(self.ln_q(h_L)).view(B, T, self.H, self.D).transpose(1, 2)
+        orig_dt = h_L.dtype
+        dt = self.q_proj.weight.dtype
+
+        # Ensure inputs match layer projection dtype
+        h_in = h_L.to(dt)
+        q_raw = self.q_proj(self.ln_q(h_in)).view(B, T, self.H, self.D).transpose(1, 2)
 
         # Apply RoPE to Query
         D = self.D
         q1, q2 = q_raw[..., : D // 2], q_raw[..., D // 2 :]
         rot = torch.cat((-q2, q1), dim=-1)
+        cos = cos.to(dt)
+        sin = sin.to(dt)
         q = q_raw * cos.unsqueeze(1) + rot * sin.unsqueeze(1)
 
-        k_hat, v_hat = kv_top
+        k_hat, v_hat = kv_top[0].to(dt), kv_top[1].to(dt)
         if self.rep > 1:
             k_hat = k_hat.repeat_interleave(self.rep, dim=1)
             v_hat = v_hat.repeat_interleave(self.rep, dim=1)
@@ -101,16 +108,16 @@ class RefinementAttentionBridge(nn.Module):
 
         causal_mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=h_L.device), diagonal=1)
         scores = scores.masked_fill(causal_mask, float("-inf"))
-        attn_weights = torch.softmax(scores, dim=-1).to(v_hat.dtype)
+        attn_weights = torch.softmax(scores, dim=-1).to(dt)
 
         attn_out = torch.matmul(attn_weights, v_hat)
         attn_out = attn_out.transpose(1, 2).reshape(B, T, self.H * self.D)
-        h_refined = h_L + self.out_proj(attn_out)
+        h_refined = h_in + self.out_proj(attn_out)
 
         # SwiGLU MLP stage
         h_norm = self.ln_mlp(h_refined)
         mlp_out = self.down_proj(F.silu(self.gate_proj(h_norm)) * self.up_proj(h_norm))
-        return h_refined + mlp_out
+        return (h_refined + mlp_out).to(orig_dt)
 
 
 class StandardMLPAdapter(nn.Module):
@@ -125,8 +132,10 @@ class StandardMLPAdapter(nn.Module):
         nn.init.zeros_(self.w2.bias)
 
     def forward(self, h_L):
-        h32 = h_L.float()
-        return h_L + self.w2(F.gelu(self.w1(self.ln(h32)))).to(h_L.dtype)
+        orig_dt = h_L.dtype
+        dt = self.w1.weight.dtype
+        x = self.ln(h_L.to(dt))
+        return (h_L.to(dt) + self.w2(F.gelu(self.w1(x)))).to(orig_dt)
 
 
 # -----------------------------------------------------------------------------
