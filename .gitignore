@@ -33,12 +33,19 @@ r.py
 check_traffic.py
 
 
-# Large foundation model weights (> 100MB)
+# Model checkpoints & large weights
+*.pt
 *.safetensors
 *.bin
 *.ckpt
 *.onnx
-base_model.pt
+*.zip
+checkpoints/
+vkr_out/
+New folder/
+
+# Experiment results & outputs
+results/
 
 # Training logs & tracking
 runs/

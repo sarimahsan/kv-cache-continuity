@@ -403,10 +403,18 @@ class Data:
             return
         from datasets import load_dataset
         enc = lambda txt: torch.tensor(tok(txt, add_special_tokens=False)["input_ids"])
-        va = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="validation")
-        if need_train:
-            tr = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
-            self.train = enc("\n\n".join(x for x in tr["text"] if x.strip()))
+        va = None
+        for repo_id in ("Salesforce/wikitext", "wikitext"):
+            try:
+                va = load_dataset(repo_id, "wikitext-2-raw-v1", split="validation")
+                if need_train:
+                    tr = load_dataset(repo_id, "wikitext-2-raw-v1", split="train")
+                    self.train = enc("\n\n".join(x for x in tr["text"] if x.strip()))
+                break
+            except Exception:
+                continue
+        if va is None:
+            raise RuntimeError("Failed to load WikiText-2 from both 'Salesforce/wikitext' and 'wikitext'.")
         self.eval["wikitext"] = self._chunks(enc("\n\n".join(x for x in va["text"] if x.strip())), T, args.eval_n, rng)
         if not args.no_c4:
             eos = tok.eos_token_id if tok.eos_token_id is not None else 0
@@ -423,7 +431,15 @@ class Data:
                 except Exception as e:  # noqa
                     print(f"  ! {repo} unavailable ({type(e).__name__}: {str(e)[:120]})")
             else:
-                print("  ! NO held-out web domain could be loaded; only WikiText will be evaluated")
+                try:
+                    c4_ds = load_dataset("stas/c4-en-10k", split="train")
+                    ids = []
+                    for r in c4_ds.select(range(min(args.c4_docs, len(c4_ds)))):
+                        ids += tok(r["text"], add_special_tokens=False)["input_ids"] + [eos]
+                    self.eval["c4"] = self._chunks(torch.tensor(ids), T, args.eval_n, rng)
+                    print(f"  held-out web domain loaded: c4 (stas/c4-en-10k fallback), {len(self.eval['c4'])} sequences")
+                except Exception as e:
+                    print("  ! NO held-out web domain could be loaded; only WikiText will be evaluated")
         print(f"  eval domains: {list(self.eval)}" + (f"; train tokens: {len(self.train):,}" if self.train is not None else ""))
 
     @staticmethod
@@ -456,6 +472,17 @@ def rollout(ctx, method, L, prompts, n_new, device):
             cur = torch.cat([cur, lg.argmax(-1, keepdim=True)], dim=1)
         outs.append(cur[0, plen:].cpu())
     return outs
+
+
+@torch.no_grad()
+def gen_nll(ctx, prompts, gens, device):
+    """Mean per-token NLL of each generated continuation under the FULL model (lower = better text)."""
+    out = []
+    for p, g in zip(prompts, gens):
+        ids = torch.cat([p, g]).unsqueeze(0).to(device)
+        lg = ctx.oracle(ids)["logits"][0, len(p) - 1:-1].float()
+        out.append(F.cross_entropy(lg, g.to(device), reduction="mean").item())
+    return out
 
 
 def rollout_metrics(ref, gen, k):
@@ -594,21 +621,30 @@ def main():
             refgen = rollout(ctx, None, L, prompts, args.rollout_new, device)
             rollouts[L] = {}
             print(f"  free-running rollout on {dom0} ({len(prompts)} prompts, {args.rollout_new} new tokens)")
-            per = {}
+            per, gens = {}, {}
             for n in ["direct", "native"] + want:
-                gen = rollout(ctx, methods[n], L, prompts, args.rollout_new, device)
-                per[n] = rollout_metrics(refgen, gen, args.rollout_new)
+                gens[n] = rollout(ctx, methods[n], L, prompts, args.rollout_new, device)
+                per[n] = rollout_metrics(refgen, gens[n], args.rollout_new)
+                per[n]["nll_each"] = gen_nll(ctx, prompts, gens[n], device)
+            ref_nll = gen_nll(ctx, prompts, refgen, device)
+            print(f"    full-model greedy text NLL (reference quality): {np.mean(ref_nll):.3f}")
             for n, rm in per.items():
                 mm, lo, hi = boot_ci(rm["match_each"], rng)
                 fm, flo, fhi = boot_ci(rm["fd_each"], rng)
-                out = dict(match=mm, match_ci=(lo, hi), first_div=fm, first_div_ci=(flo, fhi))
+                nm, nlo, nhi = boot_ci(rm["nll_each"], rng)
+                out = dict(match=mm, match_ci=(lo, hi), first_div=fm, first_div_ci=(flo, fhi),
+                           gen_nll=nm, gen_nll_ci=(nlo, nhi), ref_nll=float(np.mean(ref_nll)),
+                           tokens=[g.tolist() for g in gens[n]])
                 if "adept_hsm" in per and n in ("vkr", "kvc"):
                     out["match_vs_hsm"] = boot_ci(np.array(rm["match_each"]) - np.array(per["adept_hsm"]["match_each"]), rng)
+                    out["nll_vs_hsm"] = boot_ci(np.array(rm["nll_each"]) - np.array(per["adept_hsm"]["nll_each"]), rng)
                 rollouts[L][n] = out
-                extra = (f"   vs hsm {out['match_vs_hsm'][0]:+.1f} [{out['match_vs_hsm'][1]:+.1f},{out['match_vs_hsm'][2]:+.1f}]"
-                         if "match_vs_hsm" in out else "")
-                print(f"    {n:10s} Match@{args.rollout_new} {mm:6.2f}% [{lo:.1f},{hi:.1f}]  "
-                      f"first-div {fm:.1f} [{flo:.1f},{fhi:.1f}]{extra}")
+                extra = ""
+                if "match_vs_hsm" in out:
+                    extra = (f"   match vs hsm {out['match_vs_hsm'][0]:+.1f} [{out['match_vs_hsm'][1]:+.1f},{out['match_vs_hsm'][2]:+.1f}]"
+                             f"   NLL vs hsm {out['nll_vs_hsm'][0]:+.3f} [{out['nll_vs_hsm'][1]:+.3f},{out['nll_vs_hsm'][2]:+.3f}]")
+                print(f"    {n:10s} Match@{args.rollout_new} {mm:6.2f}% [{lo:.1f},{hi:.1f}]  first-div {fm:.1f} [{flo:.1f},{fhi:.1f}]"
+                      f"  genNLL {nm:.3f} [{nlo:.3f},{nhi:.3f}]{extra}")
 
     with open(os.path.join(args.out, f"results_v2{tag}.json"), "w") as f:
         json.dump(dict(args=vars(args), results=results, rollouts=rollouts), f, indent=2)
