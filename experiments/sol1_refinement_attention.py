@@ -182,6 +182,43 @@ def train_bridge(ctx, bridge, L, data, args, device):
             print(f"  [Bridge L={L}] Step {step:4d}/{args.train_steps} | KL Loss: {loss.item():.4f} | Elapsed: {time.time()-t0:.1f}s")
 
 
+def train_mlp(ctx, mlp_adapter, L, data, args, device):
+    mlp_adapter.train()
+    optimizer = torch.optim.AdamW(mlp_adapter.parameters(), lr=args.lr, weight_decay=1e-2)
+    scaler = make_scaler(ctx.dtype == torch.float16 and device.type == "cuda", device)
+    warmup_steps = min(50, args.train_steps // 10)
+
+    t0 = time.time()
+    for step in range(1, args.train_steps + 1):
+        if step <= warmup_steps:
+            lr_scale = float(step) / float(max(1, warmup_steps))
+        else:
+            progress = float(step - warmup_steps) / float(max(1, args.train_steps - warmup_steps))
+            lr_scale = 0.5 * (1.0 + math.cos(math.pi * progress))
+        for pg in optimizer.param_groups:
+            pg["lr"] = args.lr * lr_scale
+
+        ids = data.sample(args.batch).to(device)
+        orc = ctx.oracle(ids)
+        h_L = orc["hs"][L]
+
+        h_mlp = mlp_adapter(h_L)
+        logits_mlp = ctx.head(h_mlp)[:, :-1]
+        logits_orc = orc["logits"][:, :-1]
+
+        loss = kl_tokens(logits_orc, logits_mlp).mean()
+
+        optimizer.zero_grad(set_to_none=True)
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(mlp_adapter.parameters(), 1.0)
+        scaler.step(optimizer)
+        scaler.update()
+
+        if step % max(1, args.train_steps // 10) == 0 or step == args.train_steps:
+            print(f"  [MLP L={L}] Step {step:4d}/{args.train_steps} | KL Loss: {loss.item():.4f} | Elapsed: {time.time()-t0:.1f}s")
+
+
 @torch.no_grad()
 def evaluate_readouts(ctx, bridge, mlp_adapter, L, chunks, bs, device):
     """
@@ -317,6 +354,10 @@ def main():
     # Train Bridge
     print(f"\n--- Training Refinement Attention Bridge ({args.train_steps} steps) ---")
     train_bridge(ctx, bridge, L, data, args, device)
+
+    # Train Standard MLP Adapter baseline
+    print(f"\n--- Training Standard MLP Adapter Baseline ({args.train_steps} steps) ---")
+    train_mlp(ctx, mlp_adapter, L, data, args, device)
 
     # Evaluate across evaluation domains
     print(f"\n--- Evaluating Readout Quality across Domains ---")
