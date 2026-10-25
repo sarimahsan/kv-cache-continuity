@@ -64,6 +64,23 @@ def compute_entropy_and_conf(logits: torch.Tensor) -> Tuple[torch.Tensor, torch.
     return entropy, confidence
 
 
+def dynamic_approx(ctx: Ctx, orc: dict, L: int, kv_hats: list, exact_mask: Optional[torch.Tensor] = None):
+    h, cos, sin = orc["hs"][L], orc["cos"], orc["sin"]
+    for j, i in enumerate(range(L, ctx.N)):
+        kh, vh = kv_hats[j]
+        if exact_mask is not None:
+            if exact_mask.dim() == 1:
+                m = exact_mask.view(1, 1, -1, 1)
+            elif exact_mask.dim() == 2:
+                m = exact_mask.unsqueeze(1).unsqueeze(-1)
+            else:
+                m = exact_mask
+            kh = torch.where(m, orc["kv"][i][0], kh)
+            vh = torch.where(m, orc["kv"][i][1], vh)
+        h, _ = ctx.layer_fwd(i, h, cos, sin, (kh, vh))
+    return ctx.head(h)
+
+
 @torch.no_grad()
 def evaluate_entropy_gating(ctx: Ctx, L: int, chunks: torch.Tensor, thresholds: list, bs: int, device: torch.device):
     """
@@ -122,7 +139,7 @@ def evaluate_entropy_gating(ctx: Ctx, L: int, chunks: torch.Tensor, thresholds: 
             full_exit_mask = torch.cat([exit_mask, torch.zeros(B, 1, dtype=torch.bool, device=device)], dim=1)
             exact_history_mask = ~full_exit_mask
 
-            logits_full_tokens = ctx.approx(orc, L, kv_native, exact_mask=exact_history_mask)[:, :-1]
+            logits_full_tokens = dynamic_approx(ctx, orc, L, kv_native, exact_mask=exact_history_mask)[:, :-1]
             preds_full_tokens = logits_full_tokens.argmax(dim=-1)
 
             # Combined predictions:

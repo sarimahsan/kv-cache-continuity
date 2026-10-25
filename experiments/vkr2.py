@@ -170,7 +170,12 @@ class Ctx:
         for j, i in enumerate(range(L, self.N)):
             kh, vh = kv_hats[j]
             if exact_mask is not None:
-                m = exact_mask.view(1, 1, -1, 1)
+                if exact_mask.dim() == 1:
+                    m = exact_mask.view(1, 1, -1, 1)
+                elif exact_mask.dim() == 2:
+                    m = exact_mask.unsqueeze(1).unsqueeze(-1)
+                else:
+                    m = exact_mask
                 kh = torch.where(m, orc["kv"][i][0], kh)
                 vh = torch.where(m, orc["kv"][i][1], vh)
             h, _ = self.layer_fwd(i, h, cos, sin, (kh, vh))
