@@ -52,6 +52,7 @@ runs/
 wandb/
 tensorboard/
 *.log
+vkr3_out_different_ranks/
 
 
 # LaTeX build artifacts & temporary files

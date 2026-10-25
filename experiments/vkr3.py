@@ -87,6 +87,7 @@ def parse_args():
     p.add_argument("--exit_loss", type=float, default=1.0, help="weight of the exit-readout KL (joint / exithead)")
     p.add_argument("--keep_w", type=float, default=0.0, help="weight of a KL(exact-history adapted model || teacher) term (coadapt/joint)")
     p.add_argument("--p_exact", type=float, default=0.0, help="train with this fraction of history positions EXACT (mixed exits)")
+    p.add_argument("--train_first", type=int, default=0, help="train with a random 0..k of the FIRST tokens exact (prompt/attention-sink realism)")
     p.add_argument("--onpolicy_n", type=int, default=0, help="# self-generated training sequences (0 = off)")
     p.add_argument("--op_frac", type=float, default=0.5, help="fraction of train batches drawn from the on-policy pool")
     p.add_argument("--ranks", default="16,64,256,1024")
@@ -531,8 +532,10 @@ def train3(ctx, method, L, data, args, device):
             if kv_tr:
                 kvh = method.kv(ctx, st, Ls)
                 ehist = None
-                if args.p_exact > 0:
-                    ehist = hist_mask(T, device, exact_cols=torch.rand(T, device=device) < args.p_exact)
+                if args.p_exact > 0 or args.train_first > 0:
+                    fk = random.randint(0, args.train_first) if args.train_first > 0 else 0
+                    cols = (torch.rand(T, device=device) < args.p_exact) if args.p_exact > 0 else None
+                    ehist = hist_mask(T, device, first=fk, exact_cols=cols)
                 logits = ctx.approx(st, Ls, kvh, ehist=ehist)
                 kl = kl_tokens(orc["logits"][:, :-1], logits[:, :-1]).mean()
                 vm = vmse(orc, kvh, Ls)
@@ -567,7 +570,8 @@ def train3(ctx, method, L, data, args, device):
 
 def ckpt_path(args, ckpt_dir, name, L):
     tag = f"_s{args.seed}" if args.seed else ""
-    vt = ("_op" if args.onpolicy_n else "") + (f"_pe{args.p_exact}" if args.p_exact else "") \
+    vt = ("_op" if args.onpolicy_n else "") + (f"_pe{args.p_exact}" if args.p_exact else "")\
+        + (f"_tf{args.train_first}" if args.train_first else "") \
         + (f"_kw{args.keep_w}" if args.keep_w else "")
     sfx = f"_r{args.srank}" if name.startswith("shadow") else ""
     if name in ("adept_hsm", "kvc"):                 # share vkr2 checkpoints when the recipe is the default one
