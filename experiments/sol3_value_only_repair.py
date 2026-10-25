@@ -208,13 +208,21 @@ def train_corrector(ctx, module, L, data, args, device):
 
 
 @torch.no_grad()
-def evaluate_module(ctx, module, L, chunks, bs, device):
+def evaluate_module(ctx, module, L, chunks, bs, device, compute_diagnostics=False):
     if module is not None and hasattr(module, "eval"):
         module.eval()
-    kl_seq, top1_seq = [], []
+    kl_seq, top1_seq, nll_seq = [], [], []
+
+    # Layer-wise stats over skipped layers L..N-1
+    n_skipped = ctx.N - L
+    cos_k_sum = torch.zeros(n_skipped, device=device)
+    cos_v_sum = torch.zeros(n_skipped, device=device)
+    err_v_sum = torch.zeros(n_skipped, device=device)
+    total_samples = 0
 
     for s in range(0, len(chunks), bs):
         ids = chunks[s : s + bs].to(device)
+        B, T = ids.shape
         orc = ctx.oracle(ids)
         logits_orc = orc["logits"][:, :-1]
         orc_preds = logits_orc.argmax(-1)
@@ -222,14 +230,52 @@ def evaluate_module(ctx, module, L, chunks, bs, device):
         kv_hats = module.kv(ctx, orc, L)
         logits = ctx.approx(orc, L, kv_hats)[:, :-1]
 
+        # KL & Top-1
         kl_seq += kl_tokens(logits_orc, logits).mean(1).cpu().tolist()
         top1_seq += (logits.argmax(-1) == orc_preds).float().mean(1).cpu().tolist()
+
+        # Cross-entropy / Perplexity against target tokens
+        target_tokens = ids[:, 1:].contiguous()
+        loss_batch = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), target_tokens.view(-1), reduction="none")
+        nll_seq += loss_batch.view(B, -1).mean(1).cpu().tolist()
+
+        # Compute layer-wise diagnostics if requested
+        if compute_diagnostics:
+            for idx, lyr in enumerate(range(L, ctx.N)):
+                k_hat, v_hat = kv_hats[idx]
+                k_orc, v_orc = orc["kv"][lyr]
+
+                # Flatten across heads & hidden dim
+                kh_f, ko_f = k_hat.float().reshape(B * T, -1), k_orc.float().reshape(B * T, -1)
+                vh_f, vo_f = v_hat.float().reshape(B * T, -1), v_orc.float().reshape(B * T, -1)
+
+                cos_k = F.cosine_similarity(kh_f, ko_f, dim=-1).mean()
+                cos_v = F.cosine_similarity(vh_f, vo_f, dim=-1).mean()
+                rel_v = (torch.norm(vo_f - vh_f, p=2, dim=-1) / (torch.norm(vo_f, p=2, dim=-1) + 1e-8)).mean()
+
+                cos_k_sum[idx] += cos_k * B
+                cos_v_sum[idx] += cos_v * B
+                err_v_sum[idx] += rel_v * B
+            total_samples += B
+
+    diag = None
+    if compute_diagnostics and total_samples > 0:
+        diag = {
+            "cos_k": (cos_k_sum / total_samples).cpu().tolist(),
+            "cos_v": (cos_v_sum / total_samples).cpu().tolist(),
+            "rel_err_v": (err_v_sum / total_samples).cpu().tolist(),
+        }
+
+    mean_nll = float(np.mean(nll_seq))
+    ppl = math.exp(min(20.0, mean_nll))
 
     return {
         "kl": float(np.mean(kl_seq)),
         "top1": float(np.mean(top1_seq)) * 100.0,
+        "ppl": ppl,
         "kl_ci": boot_ci(kl_seq, np.random.RandomState(0)),
         "top1_ci": boot_ci(top1_seq, np.random.RandomState(0)),
+        "diag": diag,
     }
 
 
@@ -351,28 +397,53 @@ def main():
     }
 
     print(f"\n=======================================================")
-    print(f" Final Benchmark: Comparing Value-Only vs Full KV Repair")
+    print(f" Final Benchmark: Comprehensive Value-Only vs Full KV Repair")
     print(f"=======================================================")
+    eval_cache = {}
+
     for dom, chunks in data.eval.items():
         print(f"\n[Domain: {dom.upper()}] (N={len(chunks)} seqs x {args.seq_len} tokens)")
-        print(f"  {'Method':<22s} | {'Params':>10s} | {'Forward KL (nats)':<18s} | {'Top-1 (%)':>9s} | {'KL Red %':>9s}")
-        print(f"  {'-'*22}-|-{'-'*10}-|-{'-'*18}-|-{'-'*9}-|-{'-'*9}")
+        print(f"  {'Method':<22s} | {'Params':>9s} | {'PPL':>7s} | {'Forward KL (nats)':<18s} | {'Top-1 (%)':>9s} | {'KL Red %':>8s}")
+        print(f"  {'-'*22}-|-{'-'*9}-|-{'-'*7}-|-{'-'*18}-|-{'-'*9}-|-{'-'*8}")
 
         # Baseline Native KL for relative reduction calculation
-        native_eval = evaluate_module(ctx, methods["Native (0 params)"], L, chunks, args.eval_bs, device)
+        native_eval = evaluate_module(ctx, methods["Native (0 params)"], L, chunks, args.eval_bs, device, compute_diagnostics=(dom == "wikitext"))
         nat_kl = native_eval["kl"]
+        eval_cache[(dom, "Native (0 params)")] = native_eval
 
         for name, mod in methods.items():
             if name == "Native (0 params)":
                 ev = native_eval
                 param_count = 0
             else:
-                ev = evaluate_module(ctx, mod, L, chunks, args.eval_bs, device)
+                ev = evaluate_module(ctx, mod, L, chunks, args.eval_bs, device, compute_diagnostics=(dom == "wikitext" and name in ["Value-Only KVC", "Full KVC"]))
+                eval_cache[(dom, name)] = ev
                 param_count = n_params(mod)
 
             kl_red = 100.0 * (nat_kl - ev["kl"]) / nat_kl if nat_kl > 0 else 0.0
             kl_str = f"{ev['kl']:.4f} [{ev['kl_ci'][1]:.4f},{ev['kl_ci'][2]:.4f}]"
-            print(f"  {name:<22s} | {param_count:>10,d} | {kl_str:<18s} | {ev['top1']:>8.2f}% | {kl_red:>8.1f}%")
+            print(f"  {name:<22s} | {param_count:>9,d} | {ev['ppl']:>7.2f} | {kl_str:<18s} | {ev['top1']:>8.2f}% | {kl_red:>7.1f}%")
+
+    # Layer-wise Mechanistic Diagnostics on WikiText
+    print(f"\n=======================================================")
+    print(f" Mechanistic Proof: Layer-wise Key vs Value Drift (WikiText)")
+    print(f" Layer range: {L} to {ctx.N-1} ({ctx.N-L} skipped layers)")
+    print(f"=======================================================")
+    print(f"  {'Layer':<6s} | {'cos(K) Nat':<10s} | {'cos(K) V-KVC':<12s} | {'cos(V) Nat':<10s} | {'cos(V) V-KVC':<12s} | {'V-RelErr Nat':<12s} | {'V-RelErr V-KVC':<14s}")
+    print(f"  {'-'*6}-|-{'-'*10}-|-{'-'*12}-|-{'-'*10}-|-{'-'*12}-|-{'-'*12}-|-{'-'*14}")
+
+    diag_nat = eval_cache.get(("wikitext", "Native (0 params)"), {}).get("diag")
+    diag_val = eval_cache.get(("wikitext", "Value-Only KVC"), {}).get("diag")
+
+    if diag_nat and diag_val:
+        for idx, lyr in enumerate(range(L, ctx.N)):
+            ck_n = diag_nat["cos_k"][idx]
+            ck_v = diag_val["cos_k"][idx]
+            cv_n = diag_nat["cos_v"][idx]
+            cv_v = diag_val["cos_v"][idx]
+            err_n = diag_nat["rel_err_v"][idx]
+            err_v = diag_val["rel_err_v"][idx]
+            print(f"  L{lyr:<4d} | {ck_n:>10.4f} | {ck_v:>12.4f} | {cv_n:>10.4f} | {cv_v:>12.4f} | {err_n:>12.4f} | {err_v:>14.4f}")
 
     print("\n[Done] Solution 3 Value-Only KV Repair experiment complete.")
 

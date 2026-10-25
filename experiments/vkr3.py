@@ -542,7 +542,7 @@ def train3(ctx, method, L, data, args, device):
                 if hasattr(method, "aux"):
                     au = method.aux(st, Ls)
                     loss = loss + args.beta * au
-                    acc["aux"] += float(au)
+                    acc["aux"] += float(au.detach()) if torch.is_tensor(au) else float(au)
                 if uses_lora and args.keep_w > 0:
                     lg_ex = ctx.approx(st, Ls, kvh, ehist=hist_mask(T, device, all_exact=True))
                     loss = loss + args.keep_w * kl_tokens(orc["logits"][:, :-1], lg_ex[:, :-1]).mean()
@@ -737,11 +737,11 @@ def main():
         from transformers import AutoModelForCausalLM, AutoTokenizer
         tok = AutoTokenizer.from_pretrained(args.model)
         dt = (torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16) if device.type == "cuda" else torch.float32
-        device_map = "cuda" if device.type == "cuda" else None
         try:
-            model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dt, device_map=device_map).eval()
+            model = AutoModelForCausalLM.from_pretrained(args.model, dtype=dt)
         except TypeError:
-            model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dt).to(device).eval()
+            model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dt)
+        model = model.to(device).eval()
     for p in model.parameters():
         p.requires_grad_(False)
 
