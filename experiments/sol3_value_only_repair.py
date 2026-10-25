@@ -312,6 +312,11 @@ def main():
     ckpt_val = os.path.join(args.out, f"kvc_val_only_L{L}.pt")
     ckpt_key = os.path.join(args.out, f"kvc_key_only_L{L}.pt")
 
+    if args.eval_only:
+        for p_name, p_path in [("Full KVC", ckpt_full), ("Value-Only KVC", ckpt_val), ("Key-Only KVC", ckpt_key)]:
+            if not os.path.exists(p_path):
+                raise FileNotFoundError(f"--eval_only was specified, but checkpoint for {p_name} was not found at '{p_path}'. Please run without --eval_only to train first!")
+
     # Train or load modules
     if not args.retrain and os.path.exists(ckpt_full):
         print(f"Loading cached checkpoint: {ckpt_full}")
