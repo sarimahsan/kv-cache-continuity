@@ -69,7 +69,7 @@ def parse_args():
     p.add_argument("--depths", default="18,24")
     p.add_argument("--exp", default="main", help="comma list of: main,rank,refresh,mix,diag  (or 'all' = main,refresh,mix,diag)")
     p.add_argument("--methods", default="adept_hsm,kvc,kvcx,shadow",
-                   help="comma list: adept_hsm,kvc,kvcx,shadow[S][X][C],kvcm,coadapt,joint,exithead")
+                   help="comma list: adept_hsm,kvc,kvcx,shadow[S][X][C],kvcm,coadapt,coshadow,joint,exithead")
     p.add_argument("--seq_len", type=int, default=128)
     p.add_argument("--train_steps", type=int, default=1500)
     p.add_argument("--batch", type=int, default=4)
@@ -400,6 +400,16 @@ class KVCLora(KVC):
     lora_st = None
 
 
+class CoShadow(Shadow):
+    """Shadow trunk + LoRA on the upper layers (co-adaptation on top of the best frozen-backbone repair)."""
+    uses_lora, lora_lower, has_exit = True, False, False
+    lora_st = None
+
+    def __init__(self, d, S, rank, kvdim, flags="C", ctxk=4):
+        super().__init__(d, S, rank, kvdim, flags, ctxk)
+        self.name = "coshadow"
+
+
 class KVCJoint(KVC):
     """Whole early-exit pipeline: LoRA on ALL layers + KVC + exit-readout adapter."""
     name = "joint"
@@ -451,6 +461,8 @@ def build(name, ctx, L, args, device):
         m = KVCx(ctx.d, S, kvc_rank(bud, ctx.d, S, ctx.kvdim), ctx.kvdim, args.ctxk)
     elif name.startswith("shadow"):
         m = Shadow(ctx.d, S, args.srank, ctx.kvdim, name[len("shadow"):], args.ctxk)
+    elif name == "coshadow":
+        m = CoShadow(ctx.d, S, args.srank, ctx.kvdim, "C", args.ctxk)
     elif name == "coadapt":
         m = KVCLora(ctx.d, S, kvc_rank(bud, ctx.d, S, ctx.kvdim), ctx.kvdim)
     elif name == "joint":
@@ -573,7 +585,7 @@ def ckpt_path(args, ckpt_dir, name, L):
     vt = ("_op" if args.onpolicy_n else "") + (f"_pe{args.p_exact}" if args.p_exact else "")\
         + (f"_tf{args.train_first}" if args.train_first else "") \
         + (f"_kw{args.keep_w}" if args.keep_w else "")
-    sfx = f"_r{args.srank}" if name.startswith("shadow") else ""
+    sfx = f"_r{args.srank}" if name.startswith(("shadow", "coshadow")) else ""
     if name in ("adept_hsm", "kvc"):                 # share vkr2 checkpoints when the recipe is the default one
         vt = vt if vt else ""
     return os.path.join(ckpt_dir, f"{name}{sfx}_L{L}{vt}{tag}.pt")
@@ -771,7 +783,7 @@ def main():
             torch.save(op, opath)
         train_data = MixData(data, op.cpu(), args.op_frac)
 
-    lora_methods = [m for m in want if m in ("coadapt", "joint")]
+    lora_methods = [m for m in want if m in ("coadapt", "joint", "coshadow")]
     if lora_methods:
         ctx.install_lora(0 if "joint" in lora_methods else min(depths), args.lora_r, args.lora_alpha, args.lora_targets)
 
