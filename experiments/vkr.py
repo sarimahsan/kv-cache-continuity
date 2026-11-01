@@ -381,11 +381,16 @@ class Data:
 
 # ----------------------------------------------------------------------------- rollout
 @torch.no_grad()
-def rollout(ctx, method, L, prompts, n_new, device):
+def rollout(ctx, method, L, prompts, n_new, device, desc="rollout"):
     """Free-running greedy generation. Prompt KV exact; generated tokens' upper-layer KV approximated.
     method=None => oracle (full-depth)."""
     outs = []
-    for p in prompts:
+    try:
+        from tqdm import tqdm
+        pbar = tqdm(prompts, desc=desc, dynamic_ncols=True)
+    except Exception:
+        pbar = prompts
+    for p in pbar:
         cur = p.unsqueeze(0).to(device)
         plen = cur.shape[1]
         for _ in range(n_new):

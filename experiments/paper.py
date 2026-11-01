@@ -184,15 +184,15 @@ def part_rollout(ctx, tok, args, device, vocab):
     T = args.rollout_prompt
     ch = get_data(tok, T if not args.selftest else 8, args.rollout_n, args.selftest, vocab)
     prompts = [c for c in ch]
-    ref = rollout(ctx, None, 0, prompts, args.rollout_new, device)
-    ref2 = rollout(ctx, None, 0, prompts[:2], args.rollout_new, device)
+    ref = rollout(ctx, None, 0, prompts, args.rollout_new, device, desc="Rollout [Ref Full-depth]")
+    ref2 = rollout(ctx, None, 0, prompts[:2], args.rollout_new, device, desc="Rollout [Determinism check]")
     assert all(bool((a == b).all()) for a, b in zip(ref[:2], ref2)), "full-model rollout not deterministic"
     ref_nll = gen_nll(ctx, prompts, ref, device)
     rng, res = np.random.RandomState(0), {"ref_nll": float(np.mean(ref_nll))}
     ks = sorted({k for k in (16, 64, 256) if k <= args.rollout_new} | {args.rollout_new})
     for L in args.depths:
         for mname, m in (("native", Native()), ("direct", Direct())):
-            gen = rollout(ctx, m, L, prompts, args.rollout_new, device)
+            gen = rollout(ctx, m, L, prompts, args.rollout_new, device, desc=f"Rollout [L={L} {mname}]")
             row = {}
             for k in ks:
                 mm = rollout_metrics(ref, gen, k)
