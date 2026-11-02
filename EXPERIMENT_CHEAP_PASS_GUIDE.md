@@ -54,7 +54,7 @@ $$A_l(x) = W_{\text{up}, l}\left(\operatorname{GELU}(W_{\text{down}, l}(x))\righ
 
 ---
 
-## 4. Execution Commands
+## 4. Execution Commands (Unified or Split in 2 Parts)
 
 ### Step 0: Fast Selftest (CPU / Dry-Run, ~5 seconds)
 Verifies that all tensor dimensions, projection hooks, loss functions, gate checks, and data chunking run without errors:
@@ -62,8 +62,31 @@ Verifies that all tensor dimensions, projection hooks, loss functions, gate chec
 python experiments/cheap_pass.py --selftest
 ```
 
-### Step 1–5: Main Experiment on T4 GPU ($E \in \{18, 24, 29\}$)
-Runs ground-truth sanity check, validation baselines, adapter training (3,000 steps), offline fidelity gate, and attention-only test KL evaluation:
+---
+
+### Option A: Running in 2 Split Parts (Recommended for Kaggle / Colab)
+To avoid session timeouts and keep runs short and manageable, the experiment is split into two independent parts:
+
+#### Part 1: Adapter Training & Offline Fidelity Gate
+Trains the adapter checkpoints and checks whether the offline fidelity gate is passed:
+```bash
+# Can run for E=18 first (the pre-registered gate depth):
+python experiments/train_cheap_pass.py --depths 18 --seq_len 512 --train_steps 3000 --batch_size 4
+
+# Or all depths:
+python experiments/train_cheap_pass.py --depths 18,24,29 --seq_len 512 --train_steps 3000 --batch_size 4
+```
+
+#### Part 2: Attention-Only Test KL & Pre-Registered Gate Check
+Loads the saved checkpoints from Part 1 and evaluates on the 500 test sequences with 1,000 bootstrap CIs:
+```bash
+python experiments/eval_cheap_pass.py --depths 18 --seq_len 512 --batch_size 4
+```
+
+---
+
+### Option B: Unified Single-Command Execution
+Runs training, fidelity check, and test evaluation in one go:
 ```bash
 python experiments/cheap_pass.py \
   --model Qwen/Qwen2.5-3B \

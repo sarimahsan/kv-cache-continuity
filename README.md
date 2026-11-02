@@ -60,44 +60,36 @@ This repository implements a **teacher-forced causal disentanglement protocol** 
 
 ```text
 kv_cache_continuity/
-├── checkpoints/              # Trained lightweight adapters & tuned lens heads
-│   ├── exit_adapters_qwen_mlp.pt         # 3,000-step MLP bottleneck adapter (12.6 MB)
-│   ├── exit_adapters_qwen_tuned_lens.pt  # Tuned-lens linear calibration head (5.3 MB)
-│   ├── exit_adapters_qwen.pt             # Linear baseline adapter (25.2 MB)
-│   └── multi_depth_r512/                 # 10,000-step multi-depth adapter suite
-│       └── training_log_qwen_mlp_r512.csv
-├── doc/                      # Detailed technical documentation and run guides
-│   ├── KV_EXPERIMENTS_RUN_GUIDE.md       # Master experiment execution guide
-│   ├── RESULTS_PLACEMENT_GUIDE.md        # File mapping and directory reference
-│   ├── STATE.md                          # Empirical state & numerical audit tables
-│   ├── motivation.md                     # Mathematical derivations and proofs
-│   ├── evaluation_metrics.txt            # Formal metric definitions
-│   ├── generate_guide_pdf.py             # Script to generate PDF execution guide
-│   └── archive/                          # Historical reviewer rebuttals and scratch scripts
-├── experiments/              # Executable Python experiment scripts
-│   ├── isolate_kv_ablation.py            # Primary 3-condition causal disentanglement harness
-│   ├── run_joint_condition_sweep.py      # Mixed-exit joint execution sweep
-│   ├── run_autoregressive_generation.py  # 64-prompt autoregressive rollout with bootstrap CIs
-│   ├── run_robust_kv_swap_and_metrics.py # Shapley causal KV swap ablations
-│   ├── run_multiseed_llama_sweep.py      # Llama-3.2-1B multi-seed depth sweep
-│   ├── run_large_model_sweep.py          # Qwen2.5-7B scaling experiment
-│   ├── run_long_context_scaling.py       # Context scaling up to T=4096
-│   ├── run_entropy_domain_comparison.py  # Domain transfer (WikiText-2, C4, Code)
-│   ├── run_downstream_benchmarks.py      # Downstream reasoning benchmarks (GSM8K, ARC, MMLU)
-│   ├── benchmark_large_scale.py          # 60-prompt multi-domain wall-clock benchmark
-│   ├── train_exit_adapters.py            # Multi-depth bottleneck adapter training harness
-│   └── verify_kv_continuity.py           # Self-contained verification script
-├── results/                  # Canonical empirical data & figures
-│   ├── canonical_sweeps/                 # Paper-ready results
-│   │   ├── kv_paper/                     # Active publication sweeps (Table 1, swaps, CIs)
-│   │   ├── autoregressive_generation/    # 64-prompt generation CSVs and summaries
-│   │   ├── joint_condition/              # Mixed-exit and static joint condition sweeps
-│   │   ├── qwen2.5_3b/                   # Comprehensive Qwen-3B sweeps
-│   │   ├── llama3_family/                # Llama-3.2-1B multi-seed data
-│   │   └── graph_quality/                # Speculative execution quality data
-│   ├── figures/                          # Publication-grade vector plots (PDF + PNG)
-│   └── archive/                          # Comprehensive lineage archive of past runs
-├── src/                      # Core modules & model engines
+├── EXPERIMENT_CHEAP_PASS_GUIDE.md   # Step-by-step protocol for Cheap-Pass KV Adapter experiment
+├── LITERATURE_REVIEW_GUIDE.md       # Literature search brief, academic clusters & AI search prompts
+├── PAPER_SUMMARY_AND_FINDINGS.md    # Executive summary of claims, findings, and empirical bounds
+├── SOLUTION_AND_EMPIRICAL_RESULTS.md# Detailed technical architectures (Native Proj + Partial Verification)
+├── checkpoints/                     # Trained lightweight adapters & tuned lens heads
+├── doc/                             # Technical specifications & documentation
+│   ├── README.md                    # Documentation index
+│   ├── SELF_SPECULATIVE_DECODING_MATHEMATICAL_SPEC.md # Mathematical cost model & breakeven laws
+│   └── archive/                     # Historical review rebuttals & prior runbooks
+├── experiments/                     # Executable experimental engines & plotting scripts
+│   ├── README.md                    # Complete index of all experiment scripts
+│   ├── paper.py                     # Unified benchmark closing all reviewer items (Table 1, rollouts, latency)
+│   ├── cheap_pass.py                # Learned "Cheap Pass" KV Adapter training & evaluation engine
+│   ├── plot_cheap_pass.py           # Publication-grade plotting for cheap pass adapters
+│   ├── plot_rank_sweep.py           # Publication plot for asymptotic capacity-vs-information sweep
+│   ├── vkr1_value_repair.py         # Phase 1: Value-targeted Key-Value Repair (alias: vkr.py)
+│   ├── vkr2_unified_repair.py       # Phase 2: Unified KV Repair with KVC & bootstrap CIs (alias: vkr2.py)
+│   ├── vkr3_multi_angle_repair.py   # Phase 3: Seven-Angle Multi-Investigation Suite (alias: vkr3.py)
+│   ├── sol1_refinement_attention.py # Cross-attention refinement bridge
+│   ├── sol2_residual_unembed.py     # Residual unembedding adapter
+│   └── sol3_value_only_repair.py    # Value-only KVC repair (demonstrates Values dominate error)
+├── results/                         # Canonical empirical benchmarks, logs & figures
+│   ├── README.md                    # Master directory index of results
+│   ├── vkr/                         # Phase 1 & 2 results (Qwen-3B multi-seed, Llama-3.2-1B)
+│   ├── vkr3/                        # Phase 3 results (rank sweep, shadow trunk, coadapt/joint, exithead)
+│   ├── canonical_sweeps/            # Systematic depth, length (T=4096), and domain sweeps
+│   └── figures/                     # Publication vector plots and visualizations
+├── src/                             # Core inference engines, routers & KV caches
+└── tests/                           # Unit tests and audit integrity suites
+```
 │   ├── qwen_dynamic.py                   # Dynamic depth-truncated Qwen model engine
 │   ├── kv_cache.py                       # Static & native-projected KV cache managers
 │   ├── exit_adapter.py                   # SingleExitAdapter & ExitCalibrationModule

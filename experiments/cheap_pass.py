@@ -714,67 +714,88 @@ def run_experiment(args):
     # Step 2 & 3 & 4 & 5 for each exit depth E
     for E in args.depths:
         print(f"\n" + "#" * 80)
-        print(f" EVALUATING EXIT DEPTH E = {E}/{ctx.N} ({100 * E / ctx.N:.1f}% depth)")
+        print(f" EVALUATING EXIT DEPTH E = {E}/{ctx.N} ({100 * E / ctx.N:.1f}% depth) [Mode: {args.mode.upper()}]")
         print(f"#" * 80)
 
-        # Step 2: Baselines on Val Split
-        val_baselines = evaluate_baselines_on_val(ctx, data.val, E, device, bs=args.batch_size)
-        results["baselines_val"][f"E_{E}"] = val_baselines
-
-        # Step 3: Train Primary Adapter (Variant A, r=128 default or args.rank)
         primary_rank = args.rank if not args.selftest else args.ranks[0]
-        adapter = train_adapter(
-            ctx=ctx,
-            train_data=data.train,
-            val_data=data.val,
-            E=E,
-            device=device,
-            rank=primary_rank,
-            train_steps=args.train_steps,
-            batch_size=args.batch_size,
-            lr=args.lr,
-            lambda_mse=args.lambda_mse,
-            out_dir=args.out_dir,
-            tag="primary",
-        )
+        adapter = None
 
-        # Step 4: Offline Fidelity Gate Check
-        passed_gate, fidelity_details = offline_fidelity_gate(ctx, adapter, data.val, E, device, bs=args.batch_size)
-        results["fidelity_gate"][f"E_{E}"] = {
-            "passed": passed_gate,
-            "details": fidelity_details,
-        }
+        # --------------------------------------------------------------------
+        # Part 1: Training & Offline Fidelity Check Gate
+        # --------------------------------------------------------------------
+        if args.mode in ("all", "train"):
+            # Step 2: Baselines on Val Split
+            val_baselines = evaluate_baselines_on_val(ctx, data.val, E, device, bs=args.batch_size)
+            results["baselines_val"][f"E_{E}"] = val_baselines
 
-        # Step 5: Test Attention-Only KL
-        print(f"\n [Step 5] Evaluating Attention-Only KL on TEST split (N={len(data.test)})...")
-        test_evals = {}
-        # 1. Oracle
-        test_evals["Oracle"] = evaluate_attention_kl(ctx, None, data.test, E, device, bs=args.batch_size, seed=args.seed)
-        # 2. NativeProj
-        test_evals["NativeProj"] = evaluate_attention_kl(ctx, Native(), data.test, E, device, bs=args.batch_size, seed=args.seed)
-        # 3. Adapter
-        test_evals["Adapter"] = evaluate_attention_kl(ctx, AdapterKVMethod(adapter, "adapter"), data.test, E, device, bs=args.batch_size, seed=args.seed)
+            # Step 3: Train Primary Adapter (Variant A, r=128 default or args.rank)
+            adapter = train_adapter(
+                ctx=ctx,
+                train_data=data.train,
+                val_data=data.val,
+                E=E,
+                device=device,
+                rank=primary_rank,
+                train_steps=args.train_steps,
+                batch_size=args.batch_size,
+                lr=args.lr,
+                lambda_mse=args.lambda_mse,
+                out_dir=args.out_dir,
+                tag="primary",
+            )
 
-        # Control 2: Zero-Init Check (untrained adapter must match NativeProj exactly)
-        zero_adapter = CheapPassAdapter(ctx.d, list(range(E, ctx.N)), rank=primary_rank).to(device)
-        test_evals["ZeroInit"] = evaluate_attention_kl(ctx, AdapterKVMethod(zero_adapter, "zero_init"), data.test, E, device, bs=args.batch_size, seed=args.seed)
+            # Step 4: Offline Fidelity Gate Check
+            passed_gate, fidelity_details = offline_fidelity_gate(ctx, adapter, data.val, E, device, bs=args.batch_size)
+            results["fidelity_gate"][f"E_{E}"] = {
+                "passed": passed_gate,
+                "details": fidelity_details,
+            }
 
-        print(f"\n [Test Split Results for E={E}]:")
-        for m_name, met in test_evals.items():
-            print(f"   {m_name:12s} KL: {met['kl_mean']:.4f} [{met['kl_ci95'][0]:.4f}, {met['kl_ci95'][1]:.4f}] | Top-1: {met['top1_mean']:.2f}% [{met['top1_ci95'][0]:.2f}, {met['top1_ci95'][1]:.2f}]")
+        # --------------------------------------------------------------------
+        # Part 2: Attention-Only Test KL & Gate Evaluation
+        # --------------------------------------------------------------------
+        if args.mode in ("all", "eval"):
+            if adapter is None:
+                # Load saved checkpoint from Part 1
+                ckpt_path = os.path.join(args.out_dir, f"adapter_E{E}_r{primary_rank}_primary.pt")
+                adapter = CheapPassAdapter(ctx.d, list(range(E, ctx.N)), rank=primary_rank).to(device)
+                if os.path.exists(ckpt_path):
+                    print(f"\n [Step 5] Loaded trained adapter checkpoint from: {ckpt_path}")
+                    adapter.load_state_dict(torch.load(ckpt_path, map_location=device))
+                else:
+                    print(f"\n [Step 5] Warning: Checkpoint {ckpt_path} not found; evaluating untrained adapter!")
+                adapter.eval()
 
-        # Check Pre-registered Gate at E=18
-        if E == 18 or (args.selftest and E == args.depths[0]):
-            ad_kl = test_evals["Adapter"]["kl_mean"]
-            gate_pass = ad_kl < LN2
-            results["meta"]["primary_gate_pass"] = gate_pass
-            print("\n " + "*" * 70)
-            print(f" PRE-REGISTERED GATE RESULT (E={E}):")
-            print(f"   Adapter KL = {ad_kl:.4f} nats vs Gate Threshold {LN2:.4f} nats")
-            print(f"   VERDICT: {'PASSED (Gate Satisfied)' if gate_pass else 'FAILED (Gate Exceeded)'}")
-            print(" " + "*" * 70)
+            # Step 5: Test Attention-Only KL
+            print(f"\n [Step 5] Evaluating Attention-Only KL on TEST split (N={len(data.test)})...")
+            test_evals = {}
+            # 1. Oracle
+            test_evals["Oracle"] = evaluate_attention_kl(ctx, None, data.test, E, device, bs=args.batch_size, seed=args.seed)
+            # 2. NativeProj
+            test_evals["NativeProj"] = evaluate_attention_kl(ctx, Native(), data.test, E, device, bs=args.batch_size, seed=args.seed)
+            # 3. Adapter
+            test_evals["Adapter"] = evaluate_attention_kl(ctx, AdapterKVMethod(adapter, "adapter"), data.test, E, device, bs=args.batch_size, seed=args.seed)
 
-        results["test_attention_kl"][f"E_{E}"] = test_evals
+            # Control 2: Zero-Init Check (untrained adapter must match NativeProj exactly)
+            zero_adapter = CheapPassAdapter(ctx.d, list(range(E, ctx.N)), rank=primary_rank).to(device)
+            test_evals["ZeroInit"] = evaluate_attention_kl(ctx, AdapterKVMethod(zero_adapter, "zero_init"), data.test, E, device, bs=args.batch_size, seed=args.seed)
+
+            print(f"\n [Test Split Results for E={E}]:")
+            for m_name, met in test_evals.items():
+                print(f"   {m_name:12s} KL: {met['kl_mean']:.4f} [{met['kl_ci95'][0]:.4f}, {met['kl_ci95'][1]:.4f}] | Top-1: {met['top1_mean']:.2f}% [{met['top1_ci95'][0]:.2f}, {met['top1_ci95'][1]:.2f}]")
+
+            # Check Pre-registered Gate at E=18
+            if E == 18 or (args.selftest and E == args.depths[0]):
+                ad_kl = test_evals["Adapter"]["kl_mean"]
+                gate_pass = ad_kl < LN2
+                results["meta"]["primary_gate_pass"] = gate_pass
+                print("\n " + "*" * 70)
+                print(f" PRE-REGISTERED GATE RESULT (E={E}):")
+                print(f"   Adapter KL = {ad_kl:.4f} nats vs Gate Threshold {LN2:.4f} nats")
+                print(f"   VERDICT: {'PASSED (Gate Satisfied)' if gate_pass else 'FAILED (Gate Exceeded)'}")
+                print(" " + "*" * 70)
+
+            results["test_attention_kl"][f"E_{E}"] = test_evals
 
     # ========================================================================
     # Step 6: Controls Suite
@@ -833,6 +854,8 @@ def run_experiment(args):
 def main():
     parser = argparse.ArgumentParser(description="Learned 'Cheap Pass' KV Adapters for Early Exit")
     parser.add_argument("--model", default="Qwen/Qwen2.5-3B", help="Model name or path")
+    parser.add_argument("--mode", default="all", choices=["all", "train", "eval"],
+                        help="Execution mode: 'train' (Part 1: train adapters & offline gate), 'eval' (Part 2: evaluate attention-only test KL), or 'all' (both)")
     parser.add_argument("--depths", default="18,24,29", help="Comma-separated exit depths E")
     parser.add_argument("--seq_len", type=int, default=512, help="Sequence length")
     parser.add_argument("--n_train", type=int, default=2000, help="Train sequences")
