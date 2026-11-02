@@ -37,6 +37,11 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vkr2 import Ctx, Native, Direct, kl_tokens, boot_ci, set_seed
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+
 LN2 = math.log(2.0)  # 0.6931471805599453 nats (Exact pre-registered gate)
 
 
@@ -303,7 +308,8 @@ def evaluate_baselines_on_val(
     }
     accum = {m: {l: {"cos_k": [], "cos_v": [], "rel_mse_k": [], "rel_mse_v": []} for l in skipped} for m in methods}
 
-    for s in range(0, len(val_data), bs):
+    batches = tqdm(range(0, len(val_data), bs), desc=f" [Step 2] Val Baselines (E={E})", dynamic_ncols=True, leave=False) if tqdm else range(0, len(val_data), bs)
+    for s in batches:
         batch = val_data[s : s + bs].to(device)
         orc = ctx.oracle(batch)
 
@@ -411,6 +417,7 @@ def train_adapter(
 
     step = 0
     pbar_interval = max(1, train_steps // 10)
+    pbar = tqdm(total=train_steps, desc=f" [Step 3] Train Adapter (E={E})", dynamic_ncols=True) if tqdm else None
 
     while step < train_steps:
         # Sample batch
@@ -453,6 +460,14 @@ def train_adapter(
         lr_scheduler.step()
         step += 1
 
+        if pbar is not None:
+            pbar.set_postfix(
+                train_loss=f"{total_loss.item():.3f}",
+                val_loss=f"{best_val_loss:.3f}" if best_val_loss != float("inf") else "init",
+                lr=f"{lr_scheduler.get_last_lr()[0]:.1e}",
+            )
+            pbar.update(1)
+
         if step % pbar_interval == 0 or step == train_steps:
             # Quick val loss check
             adapter.eval()
@@ -470,10 +485,17 @@ def train_adapter(
             adapter.train()
 
             elapsed = time.time() - t0
-            print(f"   Step {step:4d}/{train_steps} | Train Loss: {total_loss.item():.4f} | Val Loss: {v_loss:.4f} | Elapsed: {elapsed:.1f}s")
+            msg = f"   Step {step:4d}/{train_steps} | Train Loss: {total_loss.item():.4f} | Val Loss: {v_loss:.4f} | Elapsed: {elapsed:.1f}s"
+            if pbar is not None:
+                pbar.write(msg)
+            else:
+                print(msg)
             if v_loss < best_val_loss and not shuffle_control:
                 best_val_loss = v_loss
                 torch.save(adapter.state_dict(), best_ckpt_path)
+
+    if pbar is not None:
+        pbar.close()
 
     # Load best checkpoint if saved
     if os.path.exists(best_ckpt_path) and not shuffle_control:
@@ -506,7 +528,8 @@ def offline_fidelity_gate(
     native_accum = {l: {"cos_k": [], "cos_v": [], "rel_mse_k": [], "rel_mse_v": []} for l in skipped}
 
     adapter.eval()
-    for s in range(0, len(val_data), bs):
+    batches = tqdm(range(0, len(val_data), bs), desc=f" [Step 4] Fidelity Gate Check (E={E})", dynamic_ncols=True, leave=False) if tqdm else range(0, len(val_data), bs)
+    for s in batches:
         batch = val_data[s : s + bs].to(device)
         orc = ctx.oracle(batch)
         pred_hs = adapter.predict_all_h(orc["hs"][E])
@@ -580,8 +603,10 @@ def evaluate_attention_kl(
     """
     kl_per_seq = []
     top1_per_seq = []
+    m_label = getattr(method_instance, "name", "Oracle") if method_instance is not None else "Oracle"
+    batches = tqdm(range(0, len(test_data), bs), desc=f" [Step 5] Test KL ({m_label}) [E={E}]", dynamic_ncols=True, leave=False) if tqdm else range(0, len(test_data), bs)
 
-    for s in range(0, len(test_data), bs):
+    for s in batches:
         batch = test_data[s : s + bs].to(device)
         orc = ctx.oracle(batch)
         ref_logits = orc["logits"][:, :-1]
