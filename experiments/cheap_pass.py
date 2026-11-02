@@ -103,17 +103,20 @@ class CheapPassAdapter(nn.Module):
         """
         Predicts h_hat for skipped layer corresponding to step_idx (0 <= step_idx < S).
         """
+        orig_dtype = h_E.dtype
         x_in = prev_h if (self.variant == "sequential" and prev_h is not None) else h_E
+        x_fp32 = x_in.float()
         
         if self.shared:
             emb = self.layer_emb(torch.tensor(step_idx, device=h_E.device))
-            x_norm = self.ln(x_in + emb)
+            x_norm = self.ln(x_fp32 + emb)
             delta = self.up(F.gelu(self.down(x_norm)))
         else:
-            x_norm = self.ln[step_idx](x_in)
+            x_norm = self.ln[step_idx](x_fp32)
             delta = self.up[step_idx](F.gelu(self.down[step_idx](x_norm)))
             
-        return x_in + delta
+        h_hat = x_fp32 + delta
+        return h_hat.to(orig_dtype)
 
     def predict_all_h(self, h_E: torch.Tensor) -> List[torch.Tensor]:
         """Predicts hidden states h_hat_l for all skipped layers."""
