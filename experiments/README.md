@@ -35,3 +35,4 @@ The key-value repair pipeline progressed through three distinct versions, each w
 * **`run_partial_verification_speculative.py`**: Evaluates speculative decoding with state resumption from $h_E$, achieving 100% mathematical output fidelity.
 * **`run_entropy_gated_exit.py`**: Evaluates dynamic entropy-based early exit policies.
 * **`harness_diag.py`**: Isolates self-exact vs self-approximate token protocol factors.
+

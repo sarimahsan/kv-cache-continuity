@@ -497,6 +497,10 @@ def train_adapter(
     if pbar is not None:
         pbar.close()
 
+    del optimizer, lr_scheduler
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
     # Load best checkpoint if saved
     if os.path.exists(best_ckpt_path) and not shuffle_control:
         adapter.load_state_dict(torch.load(best_ckpt_path, map_location=device))
@@ -585,6 +589,36 @@ def offline_fidelity_gate(
 # 6. Step 5: The Real Test - Attention-Only KL Harness
 # ============================================================================
 
+def compute_kl_and_top1_chunked(ref_logits: torch.Tensor, approx_logits: torch.Tensor, chunk_size: int = 64) -> Tuple[List[float], List[float]]:
+    """
+    Computes KL divergence and Top-1 agreement in chunks of tokens along sequence length.
+    Prevents allocating multiple 1.2+ GiB tensors for large vocabularies (e.g. Qwen V=152k).
+    """
+    B, T, V = ref_logits.shape
+    kl_sums = [0.0] * B
+    top1_sums = [0.0] * B
+
+    for t in range(0, T, chunk_size):
+        t_end = min(t + chunk_size, T)
+        r_c = ref_logits[:, t:t_end].float()
+        a_c = approx_logits[:, t:t_end].float()
+
+        lp_ref = F.log_softmax(r_c, dim=-1)
+        lp = F.log_softmax(a_c, dim=-1)
+        kl_c = (lp_ref.exp() * (lp_ref - lp)).sum(-1)  # [B, chunk]
+        top1_c = (a_c.argmax(-1) == r_c.argmax(-1)).float()  # [B, chunk]
+
+        for b in range(B):
+            kl_sums[b] += float(kl_c[b].sum().item())
+            top1_sums[b] += float(top1_c[b].sum().item())
+
+        del r_c, a_c, lp_ref, lp, kl_c, top1_c
+
+    kl_mean_per_seq = [k / max(1, T) for k in kl_sums]
+    top1_mean_per_seq = [top / max(1, T) for top in top1_sums]
+    return kl_mean_per_seq, top1_mean_per_seq
+
+
 @torch.no_grad()
 def evaluate_attention_kl(
     ctx: Ctx,
@@ -604,10 +638,11 @@ def evaluate_attention_kl(
     kl_per_seq = []
     top1_per_seq = []
     m_label = getattr(method_instance, "name", "Oracle") if method_instance is not None else "Oracle"
-    batches = tqdm(range(0, len(test_data), bs), desc=f" [Step 5] Test KL ({m_label}) [E={E}]", dynamic_ncols=True, leave=False) if tqdm else range(0, len(test_data), bs)
+    eval_bs = min(2, bs) if (device.type == "cuda" and bs > 2) else bs
+    batches = tqdm(range(0, len(test_data), eval_bs), desc=f" [Step 5] Test KL ({m_label}) [E={E}]", dynamic_ncols=True, leave=False) if tqdm else range(0, len(test_data), eval_bs)
 
     for s in batches:
-        batch = test_data[s : s + bs].to(device)
+        batch = test_data[s : s + eval_bs].to(device)
         orc = ctx.oracle(batch)
         ref_logits = orc["logits"][:, :-1]
 
@@ -618,13 +653,15 @@ def evaluate_attention_kl(
             kv_approx = method_instance.kv(ctx, orc, E)
             approx_logits = ctx.approx(orc, E, kv_approx)[:, :-1]
 
-        # Sequence-level metrics
-        kl_tokens_tensor = kl_tokens(ref_logits, approx_logits)  # [B, T-1]
-        kl_seq = kl_tokens_tensor.mean(dim=1).cpu().tolist()
-        top1_seq = (approx_logits.argmax(-1) == ref_logits.argmax(-1)).float().mean(dim=1).cpu().tolist()
+        # Memory-safe chunked computation (avoids OOM on large vocabularies)
+        kl_seq, top1_seq = compute_kl_and_top1_chunked(ref_logits, approx_logits, chunk_size=64)
 
         kl_per_seq.extend(kl_seq)
         top1_per_seq.extend(top1_seq)
+
+        del orc, ref_logits, approx_logits
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     rng = np.random.RandomState(seed)
     mean_kl, ci_lo_kl, ci_hi_kl = boot_ci(kl_per_seq, rng, n=n_resamples)
