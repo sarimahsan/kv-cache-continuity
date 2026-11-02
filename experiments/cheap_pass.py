@@ -376,6 +376,7 @@ def train_adapter(
     variant: str = "parallel",
     out_dir: str = "cheap_pass_out",
     tag: str = "main",
+    retrain: bool = False,
 ) -> CheapPassAdapter:
     """
     Step 3: Trains CheapPassAdapter using AdamW with cosine decay.
@@ -392,6 +393,15 @@ def train_adapter(
         variant=variant,
     ).to(device)
 
+    # Checkpoint Resumption Check: Skip 3,000 steps if checkpoint already exists
+    best_ckpt_path = os.path.join(out_dir, f"adapter_E{E}_r{rank}_{tag}.pt")
+    if os.path.exists(best_ckpt_path) and not shuffle_control and not retrain:
+        print(f"\n [Step 3] Found existing trained checkpoint: {best_ckpt_path}")
+        print(f"          Resuming automatically: loaded trained weights, skipping re-training!")
+        adapter.load_state_dict(torch.load(best_ckpt_path, map_location=device))
+        adapter.eval()
+        return adapter
+
     # Verification: Backbone parameters must be strictly frozen
     for p in ctx.m.parameters():
         assert not p.requires_grad, "ERROR: Backbone parameter is not frozen!"
@@ -403,8 +413,6 @@ def train_adapter(
     print(f"          Adapter parameters: {adapter.get_num_params():,} | Skipped layers: {skipped_layers}")
 
     best_val_loss = float("inf")
-    best_ckpt_path = os.path.join(out_dir, f"adapter_E{E}_r{rank}_{tag}.pt")
-    
     n_seq = len(train_data)
     t0 = time.time()
     adapter.train()
@@ -779,6 +787,7 @@ def run_experiment(args):
                 lambda_mse=args.lambda_mse,
                 out_dir=args.out_dir,
                 tag="primary",
+                retrain=getattr(args, "retrain", False),
             )
 
             # Step 4: Offline Fidelity Gate Check
