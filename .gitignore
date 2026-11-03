@@ -42,10 +42,15 @@ check_traffic.py
 *.zip
 checkpoints/
 vkr_out/
+cheap_pass_out/
+cheap_pass_checkpoints/
 New folder/
 
 # Experiment results & outputs
 results/
+cheap_pass_results*.json
+ood_results.json
+ood_results.md
 
 # Training logs & tracking
 runs/
