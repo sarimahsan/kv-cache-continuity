@@ -316,13 +316,20 @@ class RidgeRegressionMethod:
                 v_pred = v_pred_pre.transpose(1, 2)
 
             k_true, v_true = orc["kv"][target_layer]
-            total_err += ((k_pred - k_true)**2).sum().item() + ((v_pred - v_true)**2).sum().item()
-            total_denom += (k_true**2).sum().item() + (v_true**2).sum().item()
+            # Accumulate in float64 to completely eliminate FP16 accumulation overflow (>65504)
+            kp_f = k_pred.to(torch.float64)
+            kt_f = k_true.to(torch.float64)
+            vp_f = v_pred.to(torch.float64)
+            vt_f = v_true.to(torch.float64)
+
+            total_err += ((kp_f - kt_f)**2).sum().item() + ((vp_f - vt_f)**2).sum().item()
+            total_denom += (kt_f**2).sum().item() + (vt_f**2).sum().item()
 
             del orc, h_E, norm_E
             torch.cuda.empty_cache()
 
-        return total_err / (total_denom + 1e-8)
+        mse = total_err / (total_denom + 1e-8)
+        return float(mse) if not math.isnan(mse) else float("inf")
 
     def kv(self, ctx: Ctx, orc: Dict, depth: int) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         h_E = orc["hs"][depth]
@@ -424,6 +431,9 @@ def fit_all_group_r(
             except Exception:
                 W_h = torch.linalg.lstsq(A, XtY_h[l]).solution
 
+            if best_W_h is None:
+                best_W_h = W_h.float()
+
             mse_h = r_methods["R-h"]._eval_val_mse(ctx, val_tokens[:16], depth, l, W_h, device)
             if mse_h < best_mse_h:
                 best_mse_h = mse_h
@@ -434,6 +444,9 @@ def fit_all_group_r(
                 W_kv = torch.linalg.solve(A, XtY_kv[l])
             except Exception:
                 W_kv = torch.linalg.lstsq(A, XtY_kv[l]).solution
+
+            if best_W_kv is None:
+                best_W_kv = W_kv.float()
 
             mse_kv = r_methods["R-kv"]._eval_val_mse(ctx, val_tokens[:16], depth, l, W_kv, device)
             if mse_kv < best_mse_kv:
@@ -530,10 +543,13 @@ def train_gradient_adapter(
             k_hat, v_hat = ctx.project_kv(l, h_hat_l, cos, sin)
             k_true, v_true = orc["kv"][l]
 
-            rel_k = ((k_hat - k_true)**2).sum() / (((k_true)**2).sum() + 1e-8)
-            rel_v = ((v_hat - v_true)**2).sum() / (((v_true)**2).sum() + 1e-8)
-            cos_k = 1.0 - F.cosine_similarity(k_hat.flatten(1), k_true.flatten(1), dim=1).mean()
-            cos_v = 1.0 - F.cosine_similarity(v_hat.flatten(1), v_true.flatten(1), dim=1).mean()
+            kh_f, kt_f = k_hat.float(), k_true.float()
+            vh_f, vt_f = v_hat.float(), v_true.float()
+
+            rel_k = ((kh_f - kt_f)**2).sum() / (((kt_f)**2).sum() + 1e-8)
+            rel_v = ((vh_f - vt_f)**2).sum() / (((vt_f)**2).sum() + 1e-8)
+            cos_k = 1.0 - F.cosine_similarity(kh_f.flatten(1), kt_f.flatten(1), dim=1).mean()
+            cos_v = 1.0 - F.cosine_similarity(vh_f.flatten(1), vt_f.flatten(1), dim=1).mean()
 
             loss += rel_k + rel_v + cos_k + cos_v
 
