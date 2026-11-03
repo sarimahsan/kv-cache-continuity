@@ -165,13 +165,15 @@ def train_exit_head(
             h_E = orc["hs"][depth].detach()
 
         optimizer.zero_grad()
-        cand_h = head.forward(h_E[:, :-1])
-        T_seq = cand_h.shape[1]
+        h_ctx = h_E[:, :-1]
+        T_seq = h_ctx.shape[1]
 
         # Chunked distillation backward to keep VRAM minimal (<200MB autograd buffer)
+        # Calling head.forward inside each chunk gives each chunk an independent autograd graph
         for s_idx in range(0, T_seq, chunk_len):
             e_idx = min(s_idx + chunk_len, T_seq)
-            c_chunk = ctx.m.lm_head(ctx.m.model.norm(cand_h[:, s_idx:e_idx])).float()
+            cand_chunk = head.forward(h_ctx[:, s_idx:e_idx])
+            c_chunk = ctx.m.lm_head(ctx.m.model.norm(cand_chunk)).float()
             with torch.no_grad():
                 t_chunk = orc["logits"][:, s_idx:e_idx].float()
                 target_p = F.softmax(t_chunk, dim=-1)
