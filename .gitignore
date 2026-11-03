@@ -51,6 +51,9 @@ results/
 cheap_pass_results*.json
 ood_results.json
 ood_results.md
+battery_results.json
+rollout_results.json
+*results*.json
 
 # Training logs & tracking
 runs/
