@@ -100,6 +100,14 @@ def compute_chunked_kl_and_top1(
     return kl_all, top1_all
 
 
+def compute_boot_ci(values: List[float], seed: int = 0, n_resamples: int = 1000) -> Tuple[float, List[float]]:
+    if not values:
+        return 0.0, [0.0, 0.0]
+    rng = np.random.RandomState(seed)
+    mean_val, ci_lo, ci_hi = boot_ci(values, rng, n=n_resamples)
+    return float(mean_val), [float(ci_lo), float(ci_hi)]
+
+
 @torch.no_grad()
 def evaluate_condition(
     ctx: Ctx,
@@ -127,8 +135,8 @@ def evaluate_condition(
         all_kl.extend(kl_tok.mean(dim=1).cpu().tolist())
         all_top1.extend((top1_tok.mean(dim=1) * 100.0).cpu().tolist())
 
-    kl_mean, kl_ci = boot_ci(all_kl)
-    top1_mean, top1_ci = boot_ci(all_top1)
+    kl_mean, kl_ci = compute_boot_ci(all_kl)
+    top1_mean, top1_ci = compute_boot_ci(all_top1)
     return kl_mean, kl_ci, top1_mean, top1_ci
 
 

@@ -67,6 +67,14 @@ def compute_repetition_rate(tokens: List[int], n: int = 4) -> float:
     return repeated / float(len(ngrams)) if ngrams else 0.0
 
 
+def compute_boot_ci(values: List[float], seed: int = 0, n_resamples: int = 1000) -> Tuple[float, List[float]]:
+    if not values:
+        return 0.0, [0.0, 0.0]
+    rng = np.random.RandomState(seed)
+    mean_val, ci_lo, ci_hi = boot_ci(values, rng, n=n_resamples)
+    return float(mean_val), [float(ci_lo), float(ci_hi)]
+
+
 # ============================================================================
 # 2. Two-Pass Mixed-Depth Teacher-Forced Engine
 # ============================================================================
@@ -170,8 +178,8 @@ def evaluate_mixed_depth_teacher_forced(
     exit_rate = total_exited_tokens / max(1, total_tokens)
     mean_nll = float(np.mean(all_nll))
     ppl = float(math.exp(min(mean_nll, 20.0)))
-    mean_kl, ci_kl = boot_ci(all_kl)
-    mean_top1, ci_top1 = boot_ci(all_top1)
+    mean_kl, ci_kl = compute_boot_ci(all_kl)
+    mean_top1, ci_top1 = compute_boot_ci(all_top1)
 
     # Compute FLOPs per token
     # Full layer = 154.14 MFLOP. Unembed = 622.81 MFLOP. Head adapter = ~8.4 MFLOP.

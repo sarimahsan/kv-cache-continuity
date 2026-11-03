@@ -18,7 +18,7 @@ Implements all methods specified in Track 1:
      - L128: CheapPass with sigma = Identity, rank 128, W_up zero-init (3 seeds).
      - L16: Same, rank 16.
   4. References:
-     - CP128 (GELU, r=128), CP16, Native, ZeroInit, Eviction, Oracle, DirectCopy.
+     - CP128 (GELU, r=128, 3 seeds), CP16, Native, ZeroInit, Eviction, Oracle, DirectCopy.
   5. Paired Bootstrap Confidence Intervals on differences (KL_method - KL_baseline).
   6. Automated Pre-Registered Decision Rules evaluation.
 """
@@ -42,12 +42,50 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vkr2 import Ctx, Native, Direct, kl_tokens, boot_ci, set_seed
 from cheap_pass import DataSplits, CheapPassAdapter, AdapterKVMethod
-from eval_ood_cheap_pass import load_ood_domain_dataset
+from eval_ood_cheap_pass import load_ood_domain_tokens
 
 try:
     from tqdm import tqdm
 except ImportError:
     tqdm = None
+
+
+def compute_boot_ci(values: List[float], seed: int = 0, n_resamples: int = 1000) -> Tuple[float, List[float]]:
+    if not values:
+        return 0.0, [0.0, 0.0]
+    rng = np.random.RandomState(seed)
+    mean_val, ci_lo, ci_hi = boot_ci(values, rng, n=n_resamples)
+    return float(mean_val), [float(ci_lo), float(ci_hi)]
+
+
+def compute_chunked_kl_and_top1(
+    logits_target: torch.Tensor,
+    logits_pred: torch.Tensor,
+    chunk_size: int = 64,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Computes tokenwise forward KL divergence and Top-1 match without OOM."""
+    B, T, V = logits_target.shape
+    kl_chunks = []
+    top1_chunks = []
+
+    for start_idx in range(0, T, chunk_size):
+        end_idx = min(start_idx + chunk_size, T)
+        t_chk = logits_target[:, start_idx:end_idx, :].float()
+        p_chk = logits_pred[:, start_idx:end_idx, :].float()
+
+        log_p_target = F.log_softmax(t_chk, dim=-1)
+        log_p_pred = F.log_softmax(p_chk, dim=-1)
+        p_target = torch.exp(log_p_target)
+
+        kl_chk = (p_target * (log_p_target - log_p_pred)).sum(dim=-1)
+        top1_chk = (t_chk.argmax(dim=-1) == p_chk.argmax(dim=-1)).float()
+
+        kl_chunks.append(kl_chk.detach())
+        top1_chunks.append(top1_chk.detach())
+
+    kl_all = torch.cat(kl_chunks, dim=1)  # [B, T]
+    top1_all = torch.cat(top1_chunks, dim=1)  # [B, T]
+    return kl_all, top1_all
 
 
 # ============================================================================
@@ -64,12 +102,9 @@ class PostProjectionScalingMethod:
         self.params = {}
 
     def fit(self, ctx: Ctx, train_tokens: torch.Tensor, depth: int, device: torch.device):
-        """Fits S1, S2, S3, or S4 parameters via closed-form least squares on train split."""
         skipped_layers = list(range(depth, ctx.N))
-        num_skipped = len(skipped_layers)
 
         if self.mode == "S4":
-            # Accumulate channelwise means for h_E and h_l
             sum_h_E = torch.zeros(ctx.d, dtype=torch.float64, device=device)
             sum_h_l = {l: torch.zeros(ctx.d, dtype=torch.float64, device=device) for l in skipped_layers}
             total_tokens = 0
@@ -88,13 +123,10 @@ class PostProjectionScalingMethod:
             self.params = {l: (mu_l[l] - mu_E) for l in skipped_layers}
             return
 
-        # S1, S2, S3: Fit scaling on pre-RoPE K and V projections
-        # Accumulate cross-products and norms
         accum = {
             l: {
                 "dot_k": None, "norm_k": None,
                 "dot_v": None, "norm_v": None,
-                # For S3 (channelwise affine: y = a*x + b)
                 "sum_x_k": None, "sum_y_k": None, "sum_xx_k": None, "sum_xy_k": None,
                 "sum_x_v": None, "sum_y_v": None, "sum_xx_v": None, "sum_xy_v": None,
                 "count": 0
@@ -102,7 +134,6 @@ class PostProjectionScalingMethod:
             for l in skipped_layers
         }
 
-        # Subsample train tokens for fast closed-form solution
         n_fit = min(len(train_tokens), 250)
         for i in range(0, n_fit, 4):
             b = train_tokens[i : i + 4].to(device)
@@ -113,11 +144,9 @@ class PostProjectionScalingMethod:
             for l in skipped_layers:
                 lay = ctx.layers[l]
                 n = lay.input_layernorm(h_E)
-                # Pre-RoPE projections
                 k_hat = lay.self_attn.k_proj(n).view(B, T, ctx.Hkv, ctx.D).float()
                 v_hat = lay.self_attn.v_proj(n).view(B, T, ctx.Hkv, ctx.D).float()
 
-                # True pre-RoPE K and V
                 n_true = lay.input_layernorm(orc["hs"][l])
                 k_true = lay.self_attn.k_proj(n_true).view(B, T, ctx.Hkv, ctx.D).float()
                 v_true = lay.self_attn.v_proj(n_true).view(B, T, ctx.Hkv, ctx.D).float()
@@ -126,7 +155,6 @@ class PostProjectionScalingMethod:
                 st["count"] += B * T
 
                 if self.mode == "S1":
-                    # Single scalar per layer: s = <hat, true> / ||hat||^2
                     dk = (k_hat * k_true).sum().item()
                     nk = (k_hat * k_hat).sum().item()
                     dv = (v_hat * v_true).sum().item()
@@ -137,7 +165,6 @@ class PostProjectionScalingMethod:
                     st["norm_v"] = (st["norm_v"] or 0.0) + nv
 
                 elif self.mode == "S2":
-                    # Per-head scalar: shape [Hkv, 1]
                     dk = (k_hat * k_true).sum(dim=(0, 1, 3))
                     nk = (k_hat * k_hat).sum(dim=(0, 1, 3))
                     dv = (v_hat * v_true).sum(dim=(0, 1, 3))
@@ -148,8 +175,6 @@ class PostProjectionScalingMethod:
                     st["norm_v"] = (st["norm_v"] if st["norm_v"] is not None else 0.0) + nv
 
                 elif self.mode == "S3":
-                    # Per-channel affine (scale + bias): shape [Hkv, D]
-                    # Flatten heads and D into channel dim: [B*T, Hkv*D]
                     kh_flat = k_hat.view(-1, ctx.Hkv * ctx.D)
                     kt_flat = k_true.view(-1, ctx.Hkv * ctx.D)
                     vh_flat = v_hat.view(-1, ctx.Hkv * ctx.D)
@@ -165,7 +190,6 @@ class PostProjectionScalingMethod:
                     st["sum_xx_v"] = (st["sum_xx_v"] if st["sum_xx_v"] is not None else 0.0) + (vh_flat * vh_flat).sum(0)
                     st["sum_xy_v"] = (st["sum_xy_v"] if st["sum_xy_v"] is not None else 0.0) + (vh_flat * vt_flat).sum(0)
 
-        # Compute optimal closed-form parameters
         for l in skipped_layers:
             st = accum[l]
             if self.mode == "S1":
@@ -178,7 +202,6 @@ class PostProjectionScalingMethod:
                 self.params[l] = {"sk": sk, "sv": sv}
             elif self.mode == "S3":
                 N = st["count"]
-                # Linear regression: slope a = (N*xy - x*y) / (N*xx - x^2), intercept b = (y - a*x)/N
                 denom_k = N * st["sum_xx_k"] - st["sum_x_k"]**2 + 1e-8
                 ak = (N * st["sum_xy_k"] - st["sum_x_k"] * st["sum_y_k"]) / denom_k
                 bk = (st["sum_y_k"] - ak * st["sum_x_k"]) / N
@@ -201,7 +224,6 @@ class PostProjectionScalingMethod:
         for l in range(depth, ctx.N):
             lay = ctx.layers[l]
             if self.mode == "S4":
-                # Mean-drift correction on h before native projection
                 delta_h = self.params[l].to(h_E.device, dtype=h_E.dtype)
                 h_hat = h_E + delta_h
                 k_hat, v_hat = ctx.project_kv(l, h_hat, cos, sin)
@@ -209,7 +231,6 @@ class PostProjectionScalingMethod:
                 continue
 
             n = lay.input_layernorm(h_E)
-            # Pre-RoPE projections
             k_proj = lay.self_attn.k_proj(n).view(B, T, ctx.Hkv, ctx.D)
             v_proj = lay.self_attn.v_proj(n).view(B, T, ctx.Hkv, ctx.D)
 
@@ -224,7 +245,6 @@ class PostProjectionScalingMethod:
                 k_scaled = k_proj * p["ak"].to(k_proj.device, dtype=k_proj.dtype) + p["bk"].to(k_proj.device, dtype=k_proj.dtype)
                 v_scaled = v_proj * p["av"].to(v_proj.device, dtype=v_proj.dtype) + p["bv"].to(v_proj.device, dtype=v_proj.dtype)
 
-            # Apply RoPE to K post-scaling
             k_final = ctx.rope(k_scaled.transpose(1, 2), cos, sin)
             v_final = v_scaled.transpose(1, 2)
             out.append((k_final, v_final))
@@ -258,11 +278,9 @@ class RidgeRegressionMethod:
         lambda_grid: List[float] = [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1],
     ):
         skipped_layers = list(range(depth, ctx.N))
-        d_in = ctx.d  # 2048
+        d_in = ctx.d
 
-        # 1. Accumulate X^T X and X^T Y in fp64 over train tokens
         print(f" [{self.name}] Accumulating fp64 covariance matrices over train tokens...")
-        # X: [N, d_in + 1] (with bias column)
         XtX = torch.zeros((d_in + 1, d_in + 1), dtype=torch.float64, device=device)
         XtY = {l: None for l in skipped_layers}
 
@@ -270,24 +288,20 @@ class RidgeRegressionMethod:
         for i in range(0, n_fit, 4):
             b = train_tokens[i : i + 4].to(device)
             orc = ctx.oracle(b)
-            # Input x = RMSNorm_E(h_E)
             h_E = orc["hs"][depth]
             norm_E = ctx.layers[depth].input_layernorm(h_E)
             B, T, _ = norm_E.shape
             X_batch = norm_E.view(-1, d_in).to(torch.float64)
-            # Append bias column of ones
             ones = torch.ones((X_batch.shape[0], 1), dtype=torch.float64, device=device)
-            X_aug = torch.cat([X_batch, ones], dim=1)  # [B*T, d_in + 1]
+            X_aug = torch.cat([X_batch, ones], dim=1)
 
             XtX += X_aug.T @ X_aug
 
             for l in skipped_layers:
                 if self.mode in ("R-h", "R-h-r128"):
-                    # Residual target: Y = h_l - h_E
                     h_l = orc["hs"][l]
                     Y_batch = (h_l - h_E).view(-1, d_in).to(torch.float64)
                 elif self.mode == "R-kv":
-                    # Direct pre-RoPE K and V target (concatenated): [B*T, 512]
                     lay = ctx.layers[l]
                     n_l = lay.input_layernorm(orc["hs"][l])
                     k_t = lay.self_attn.k_proj(n_l).view(-1, ctx.Hkv * ctx.D).to(torch.float64)
@@ -298,11 +312,10 @@ class RidgeRegressionMethod:
                     XtY[l] = torch.zeros((d_in + 1, Y_batch.shape[1]), dtype=torch.float64, device=device)
                 XtY[l] += X_aug.T @ Y_batch
 
-        # 2. Grid-search lambda on validation set to minimize relative MSE of K and V
         print(f" [{self.name}] Selecting optimal regularization lambda on validation split...")
         tr_XtX = torch.trace(XtX[:d_in, :d_in]).item()
         I_reg = torch.eye(d_in + 1, dtype=torch.float64, device=device)
-        I_reg[-1, -1] = 0.0  # Do not regularize bias
+        I_reg[-1, -1] = 0.0
 
         for l in skipped_layers:
             best_rel_mse = float("inf")
@@ -310,23 +323,19 @@ class RidgeRegressionMethod:
             best_lam = lambda_grid[0]
 
             for lam in lambda_grid:
-                # Regularization scaled by tr(XtX)/d
                 alpha = lam * (tr_XtX / d_in)
                 A = XtX + alpha * I_reg
-                # Solve A W = XtY via cholesky or standard solve
                 try:
-                    W_sol = torch.linalg.solve(A, XtY[l])  # [d_in + 1, d_out]
+                    W_sol = torch.linalg.solve(A, XtY[l])
                 except Exception:
                     W_sol = torch.linalg.lstsq(A, XtY[l]).solution
 
-                # Truncate via SVD if low-rank mode
                 if self.mode == "R-h-r128" and self.rank is not None:
                     W_feat = W_sol[:d_in, :]
                     U, S, Vh = torch.linalg.svd(W_feat, full_matrices=False)
                     W_lr = U[:, : self.rank] @ torch.diag(S[: self.rank]) @ Vh[: self.rank, :]
                     W_sol = torch.cat([W_lr, W_sol[-1:, :]], dim=0)
 
-                # Evaluate Relative MSE on validation tokens
                 rel_mse = self._eval_val_mse(ctx, val_tokens[:32], depth, l, W_sol, device)
                 if rel_mse < best_rel_mse:
                     best_rel_mse = rel_mse
@@ -419,14 +428,12 @@ class LinearCheapPassAdapter(nn.Module):
         for i in range(self.S):
             nn.init.kaiming_uniform_(self.down[i].weight, a=math.sqrt(5))
             nn.init.zeros_(self.down[i].bias)
-            # Strict Zero-Init Invariance
             nn.init.zeros_(self.up[i].weight)
             nn.init.zeros_(self.up[i].bias)
 
     def forward(self, h_E: torch.Tensor, step_idx: int) -> torch.Tensor:
         orig_dtype = h_E.dtype
         x_fp32 = h_E.float()
-        # Linear map: W_up * W_down * x (No GELU)
         delta = self.up[step_idx](self.down[step_idx](x_fp32))
         return (x_fp32 + delta).to(orig_dtype)
 
@@ -446,7 +453,6 @@ def train_gradient_adapter(
     batch_size: int = 4,
     seed: int = 0,
 ) -> nn.Module:
-    """Trains L128, L16, CP128, or CP16 on train split using identical loss and optimizer."""
     set_seed(seed)
     adapter = adapter.to(device).train()
     optimizer = torch.optim.AdamW(adapter.parameters(), lr=lr, weight_decay=1e-4)
@@ -472,7 +478,6 @@ def train_gradient_adapter(
             k_hat, v_hat = ctx.project_kv(l, h_hat_l, cos, sin)
             k_true, v_true = orc["kv"][l]
 
-            # Loss = Relative MSE + Cosine distance on K and V
             rel_k = ((k_hat - k_true)**2).sum() / (((k_true)**2).sum() + 1e-8)
             rel_v = ((v_hat - v_true)**2).sum() / (((v_true)**2).sum() + 1e-8)
             cos_k = 1.0 - F.cosine_similarity(k_hat.flatten(1), k_true.flatten(1), dim=1).mean()
@@ -489,8 +494,42 @@ def train_gradient_adapter(
 
 
 # ============================================================================
-# 4. Paired Bootstrap and Statistical Decision Suite
+# 4. Evaluation Function with Paired Bootstrap Output
 # ============================================================================
+
+@torch.no_grad()
+def evaluate_method_per_sequence(
+    ctx: Ctx,
+    method_instance,
+    tokens: torch.Tensor,
+    depth: int,
+    exact_mask: Optional[torch.Tensor] = None,
+    device: torch.device = torch.device("cpu"),
+    batch_size: int = 4,
+) -> Tuple[List[float], List[float]]:
+    """Evaluates method returning per-sequence KL and Top-1 match lists."""
+    all_kl = []
+    all_top1 = []
+
+    for i in range(0, len(tokens), batch_size):
+        batch = tokens[i : i + batch_size].to(device)
+        orc = ctx.oracle(batch)
+
+        if method_instance is None:
+            # Oracle baseline
+            lg = orc["logits"][:, :-1]
+        else:
+            synth_kv = method_instance.kv(ctx, orc, depth)
+            lg = ctx.approx(orc, depth, synth_kv, exact_mask=exact_mask)[:, :-1]
+
+        t_lg = orc["logits"][:, :-1]
+        kl_tok, top1_tok = compute_chunked_kl_and_top1(t_lg, lg, chunk_size=64)
+
+        all_kl.extend(kl_tok.mean(dim=1).cpu().tolist())
+        all_top1.extend((top1_tok.mean(dim=1) * 100.0).cpu().tolist())
+
+    return all_kl, all_top1
+
 
 def paired_bootstrap_diff(
     values_a: List[float],
@@ -499,10 +538,6 @@ def paired_bootstrap_diff(
     alpha: float = 0.05,
     seed: int = 0,
 ) -> Tuple[float, List[float]]:
-    """
-    Computes mean difference and 95% paired bootstrap CI on sequence differences (a - b).
-    Strictly pairs sequence i of method A with sequence i of method B.
-    """
     diffs = np.array(values_a) - np.array(values_b)
     mean_diff = float(np.mean(diffs))
     rng = np.random.RandomState(seed)
@@ -523,9 +558,8 @@ def paired_bootstrap_diff(
 # ============================================================================
 
 def compute_cost_accounting(method_name: str, depth: int, L: int = 36, d: int = 2048, Hkv: int = 2, D: int = 128) -> Dict[str, float]:
-    """Calculates parameters, extra FLOPs per skipped layer per token, and memory traffic."""
     skipped = L - depth
-    if method_name in ("Native", "ZeroInit", "Oracle", "DirectCopy"):
+    if method_name in ("Native", "ZeroInit", "Oracle", "DirectCopy", "Eviction"):
         return {"params": 0, "flops_per_layer": 0.0, "bytes_per_layer": 0}
     elif method_name == "S1":
         return {"params": 2 * skipped, "flops_per_layer": 2 * Hkv * D * 2, "bytes_per_layer": 2 * 2}
@@ -536,15 +570,12 @@ def compute_cost_accounting(method_name: str, depth: int, L: int = 36, d: int = 
     elif method_name == "S4":
         return {"params": d * skipped, "flops_per_layer": d, "bytes_per_layer": d * 2}
     elif method_name == "R-h":
-        # Full-rank map: [d+1, d] per layer
         params = (d + 1) * d * skipped
         return {"params": params, "flops_per_layer": 2 * (d + 1) * d, "bytes_per_layer": (d + 1) * d * 2}
     elif method_name == "R-kv":
-        # Map: [d+1, 2*Hkv*D] per layer
         params = (d + 1) * (2 * Hkv * D) * skipped
         return {"params": params, "flops_per_layer": 2 * (d + 1) * (2 * Hkv * D), "bytes_per_layer": (d + 1) * (2 * Hkv * D) * 2}
     elif method_name in ("R-h-r128", "L128", "CP128"):
-        # Low rank r=128: 2 * d * 128 params per layer
         params = 2 * d * 128 * skipped
         return {"params": params, "flops_per_layer": 4 * d * 128, "bytes_per_layer": 2 * d * 128 * 2}
     elif method_name in ("L16", "CP16"):
@@ -572,7 +603,6 @@ def run_track1_benchmark(
     device = torch.device(device_str if torch.cuda.is_available() and device_str == "cuda" else "cpu")
     os.makedirs(os.path.dirname(out_file), exist_ok=True)
 
-    # 1. Load Data
     if not selftest:
         tok = AutoTokenizer.from_pretrained(model_name)
         data = DataSplits(tok, seq_len=512, n_train=2000, n_val=200, n_test=500, seed=0)
@@ -583,10 +613,6 @@ def run_track1_benchmark(
         data = DataSplits(None, seq_len=512, n_train=10, n_val=10, n_test=16, seed=0, selftest=True)
         model = None
 
-    if model is None and not selftest:
-        return
-
-    # In selftest without GPU, return empty mock
     if model is None:
         print(" [Selftest] Running mock decision validation...")
         return
@@ -594,10 +620,7 @@ def run_track1_benchmark(
     ctx = Ctx(model)
     primary_depth = 18
 
-    # Container for all sequence-level KL lists for paired bootstrap
-    seq_kl_records = {}
-
-    # Run fitting on primary depth E=18
+    # 1. Fit Group S Methods
     print("\n --- Fitting Group S Methods (S1, S2, S3, S4) at E=18 ---")
     s_methods = {
         "S1": PostProjectionScalingMethod("S1", "S1_scalar"),
@@ -609,6 +632,7 @@ def run_track1_benchmark(
         print(f" Fitting {name}...")
         m.fit(ctx, data.train, primary_depth, device)
 
+    # 2. Fit Group R Methods
     print("\n --- Fitting Group R Methods (R-h, R-kv, R-h-r128) at E=18 ---")
     r_methods = {
         "R-h": RidgeRegressionMethod("R-h", name="R-h_full_rank"),
@@ -619,6 +643,7 @@ def run_track1_benchmark(
         print(f" Fitting {name}...")
         m.fit(ctx, data.train, data.val, primary_depth, device)
 
+    # 3. Train Group L & CP Adapters (3 Seeds)
     print("\n --- Training Group L and References (3 Seeds) at E=18 ---")
     skipped_18 = list(range(primary_depth, ctx.N))
     l128_adapters = [
@@ -630,8 +655,137 @@ def run_track1_benchmark(
         train_gradient_adapter(ctx, CheapPassAdapter(ctx.d, skipped_18, rank=128), data.train, data.val, primary_depth, device, seed=s)
         for s in [0, 1, 2]
     ]
+    cp16_adapter = train_gradient_adapter(ctx, CheapPassAdapter(ctx.d, skipped_18, rank=16), data.train, data.val, primary_depth, device, seed=0)
 
-    print("\n [Done] All baselines fitted. Evaluation proceeding across depths and OOD...")
+    # Construct evaluation catalog for E=18
+    eval_catalog_18 = {
+        "Native": Native(),
+        "DirectCopy": Direct(),
+        "S1": s_methods["S1"],
+        "S2": s_methods["S2"],
+        "S3": s_methods["S3"],
+        "S4": s_methods["S4"],
+        "R-h": r_methods["R-h"],
+        "R-kv": r_methods["R-kv"],
+        "R-h-r128": r_methods["R-h-r128"],
+        "L16": AdapterKVMethod(l16_adapter, "L16"),
+        "L128_s0": AdapterKVMethod(l128_adapters[0], "L128_s0"),
+        "L128_s1": AdapterKVMethod(l128_adapters[1], "L128_s1"),
+        "L128_s2": AdapterKVMethod(l128_adapters[2], "L128_s2"),
+        "CP16": AdapterKVMethod(cp16_adapter, "CP16"),
+        "CP128_s0": AdapterKVMethod(cp128_adapters[0], "CP128_s0"),
+        "CP128_s1": AdapterKVMethod(cp128_adapters[1], "CP128_s1"),
+        "CP128_s2": AdapterKVMethod(cp128_adapters[2], "CP128_s2"),
+    }
+
+    # Evaluate Table A: E=18, p=100%
+    print("\n ==================================================================")
+    print(" TABLE A: EVALUATION AT E=18 (p=100%, Held-out Test N=500)")
+    print(" ==================================================================")
+    table_a_results = {}
+    seq_kl_store = {}
+
+    for name, m in eval_catalog_18.items():
+        kl_seq, top1_seq = evaluate_method_per_sequence(ctx, m, data.test, primary_depth, device=device)
+        m_kl, ci_kl = compute_boot_ci(kl_seq)
+        m_top, ci_top = compute_boot_ci(top1_seq)
+        seq_kl_store[name] = kl_seq
+        cost = compute_cost_accounting(name.split("_")[0], primary_depth, L=ctx.N, d=ctx.d)
+
+        table_a_results[name] = {
+            "kl_mean": m_kl,
+            "kl_ci95": ci_kl,
+            "top1_mean": m_top,
+            "top1_ci95": ci_top,
+            "cost": cost,
+        }
+        print(f"  [{name:12s}] KL: {m_kl:.4f} [{ci_kl[0]:.4f}, {ci_kl[1]:.4f}] | Top-1: {m_top:.2f}% | Params: {cost['params']:,}")
+
+    # Paired Bootstrap Differences vs Native and CP128_s0
+    print("\n --- Computing Paired Bootstrap Confidence Intervals ---")
+    paired_results = {}
+    native_kls = seq_kl_store["Native"]
+    cp128_kls = seq_kl_store["CP128_s0"]
+
+    for name in eval_catalog_18:
+        if name in ("Native", "CP128_s0"):
+            continue
+        diff_nat, ci_nat = paired_bootstrap_diff(seq_kl_store[name], native_kls)
+        diff_cp, ci_cp = paired_bootstrap_diff(seq_kl_store[name], cp128_kls)
+        paired_results[name] = {
+            "diff_vs_native": {"mean": diff_nat, "ci95": ci_nat},
+            "diff_vs_cp128": {"mean": diff_cp, "ci95": ci_cp},
+        }
+        print(f"  [{name:12s}] vs CP128 diff: {diff_cp:+.4f} [{ci_cp[0]:+.4f}, {ci_cp[1]:+.4f}]")
+
+    # Evaluate Decision Rules (Section 1.7)
+    kl_native = table_a_results["Native"]["kl_mean"]
+    kl_cp128 = table_a_results["CP128_s0"]["kl_mean"]
+    cp_gain = kl_native - kl_cp128
+
+    print("\n ==================================================================")
+    print(" PRE-REGISTERED DECISION RULES EVALUATION")
+    print(" ==================================================================")
+    decision_outcomes = {}
+
+    # Rule 1: S-methods close >= 50% of CP128 gain?
+    best_s_name = min(["S1", "S2", "S3", "S4"], key=lambda k: table_a_results[k]["kl_mean"])
+    best_s_gain = kl_native - table_a_results[best_s_name]["kl_mean"]
+    s_gap_closed_pct = (best_s_gain / cp_gain) * 100.0
+    rule1_pass = (s_gap_closed_pct >= 50.0)
+    decision_outcomes["rule1_scale_offset_explains_gain"] = {
+        "best_method": best_s_name,
+        "gap_closed_pct": s_gap_closed_pct,
+        "passed": rule1_pass,
+        "verdict": "Scale/Offset explains >=50% gain" if rule1_pass else "Learned coordinate rotation is required (S closed <50%)"
+    }
+    print(f" Decision 1 (Scale/Offset): Best {best_s_name} closed {s_gap_closed_pct:.1f}% of CP gain. -> {decision_outcomes['rule1_scale_offset_explains_gain']['verdict']}")
+
+    # Rule 2: Closed-form ridge closes >= 90% of CP128 gain?
+    best_r_name = min(["R-h", "R-kv", "R-h-r128"], key=lambda k: table_a_results[k]["kl_mean"])
+    best_r_gain = kl_native - table_a_results[best_r_name]["kl_mean"]
+    r_gap_closed_pct = (best_r_gain / cp_gain) * 100.0
+    rule2_pass = (r_gap_closed_pct >= 90.0)
+    decision_outcomes["rule2_closed_form_suffices"] = {
+        "best_method": best_r_name,
+        "gap_closed_pct": r_gap_closed_pct,
+        "passed": rule2_pass,
+        "verdict": "Closed-form linear map suffices" if rule2_pass else "Gradient-trained adapter outperforms closed-form ridge"
+    }
+    print(f" Decision 2 (Closed-Form): Best {best_r_name} closed {r_gap_closed_pct:.1f}% of CP gain. -> {decision_outcomes['rule2_closed_form_suffices']['verdict']}")
+
+    # Rule 3: L128 within paired CI of CP128?
+    l128_cp_ci = paired_results["L128_s0"]["diff_vs_cp128"]["ci95"]
+    rule3_pass = (l128_cp_ci[0] <= 0.0 <= l128_cp_ci[1])
+    decision_outcomes["rule3_gelu_unnecessary"] = {
+        "l128_vs_cp128_diff_ci": l128_cp_ci,
+        "passed": rule3_pass,
+        "verdict": "GELU is unnecessary (L128 within paired CI)" if rule3_pass else "GELU produces statistically significant separation"
+    }
+    print(f" Decision 3 (Nonlinearity): L128 vs CP128 CI = {l128_cp_ci}. -> {decision_outcomes['rule3_gelu_unnecessary']['verdict']}")
+
+    # Rule 4: CP128 beats L128 and all R with paired CI excluding 0 and >= 10% relative reduction?
+    rel_red_l128 = (table_a_results["L128_s0"]["kl_mean"] - kl_cp128) / table_a_results["L128_s0"]["kl_mean"]
+    rule4_pass = (l128_cp_ci[0] > 0.0 and rel_red_l128 >= 0.10)
+    decision_outcomes["rule4_nonlinearity_matters"] = {
+        "rel_reduction_vs_l128": rel_red_l128 * 100.0,
+        "passed": rule4_pass,
+        "verdict": "Nonlinearity matters (CP128 beats linear by >=10%)" if rule4_pass else "Linear map achieves comparable performance"
+    }
+    print(f" Decision 4 (Strong Nonlinearity): -> {decision_outcomes['rule4_nonlinearity_matters']['verdict']}")
+    print(" ==================================================================\n")
+
+    # Save Output JSON
+    full_output = {
+        "meta": {"model": model_name, "depths": depths, "n_test": len(data.test)},
+        "table_a_E18_p100": table_a_results,
+        "paired_bootstrap": paired_results,
+        "pre_registered_decisions": decision_outcomes,
+    }
+
+    with open(out_file, "w") as f:
+        json.dump(full_output, f, indent=2)
+    print(f" [Done] Track 1 results successfully exported to {out_file}")
 
 
 def main():
@@ -655,4 +809,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
