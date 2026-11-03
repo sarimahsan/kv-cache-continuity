@@ -101,3 +101,4 @@ Part 2 evaluates two practical deployment configurations:
 ### 3.2 Computational Budget
 * **OOD Evaluation (Part 1):** $\sim 100\text{ sequences} \times 2\text{ domains} \times 3\text{ depths} \approx 600\text{ forward passes}$. Wall-clock time on T4: **$< 4\text{ minutes}$**.
 * **Autoregressive Rollout (Part 2):** $64\text{ prompts} \times 128\text{ tokens} \times 4\text{ methods} \approx 32{,}768\text{ token steps}$. Wall-clock time on T4: **$\sim 20 - 25\text{ minutes}$**.
+

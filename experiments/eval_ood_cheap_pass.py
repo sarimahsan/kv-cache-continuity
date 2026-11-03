@@ -67,8 +67,8 @@ def load_ood_domain_tokens(
         repo_specs = [("HuggingFaceFW/fineweb-edu", dict(name="sample-10BT", split="train"))]
     elif domain == "code":
         repo_specs = [
-            ("bigcode/the-stack-smol", dict(data_dir="data/python", split="train")),
-            ("codeparrot/github-code-clean", dict(split="train")),
+            ("iamtarun/python_code_instructions_18k_alpaca", dict(split="train")),
+            ("vikp/python_code_instructions_filtered", dict(split="train")),
         ]
     elif domain == "math":
         repo_specs = [
@@ -87,6 +87,10 @@ def load_ood_domain_tokens(
                 t = ""
                 if domain == "math" and "question" in r and "answer" in r:
                     t = f"Question: {r['question']}\nSolution: {r['answer']}"
+                elif "output" in r and len(r["output"]) > 20:
+                    t = r["output"]
+                elif "code" in r and len(r["code"]) > 20:
+                    t = r["code"]
                 elif "content" in r:
                     t = r["content"]
                 elif "text" in r:
@@ -176,16 +180,37 @@ def run_ood_eval(args):
             print(f" EVALUATING DOMAIN: '{dom.upper()}' AT DEPTH E = {E}/{ctx.N}")
             print("#" * 80)
 
-            # Load Adapter
-            ckpt_path = os.path.join(args.ckpt_dir, f"adapter_E{E}_r{args.rank}_primary.pt")
+            # Load Adapter (Search candidate directories)
+            fname = f"adapter_E{E}_r{args.rank}_primary.pt"
+            candidate_dirs = [
+                args.ckpt_dir,
+                "cheap_pass_out",
+                "cheap_pass_checkpoints",
+                "../cheap_pass_out",
+                "../cheap_pass_checkpoints",
+                "/kaggle/working/cheap_pass_out",
+                "/kaggle/working/cheap_pass_checkpoints",
+                "/kaggle/working/kv-cache-continuity/cheap_pass_out",
+                "/kaggle/working/kv-cache-continuity/cheap_pass_checkpoints",
+            ]
+            ckpt_path = None
+            for cd in candidate_dirs:
+                cand = os.path.join(cd, fname)
+                if os.path.exists(cand):
+                    ckpt_path = cand
+                    break
+
             skipped = list(range(E, ctx.N))
             adapter = CheapPassAdapter(ctx.d, skipped, rank=args.rank).to(device)
 
-            if os.path.exists(ckpt_path):
-                print(f" [Checkpoint] Loaded trained weights from: {ckpt_path}")
+            if ckpt_path is not None:
+                print(f" [Checkpoint] Successfully loaded trained weights from: {ckpt_path}")
                 adapter.load_state_dict(torch.load(ckpt_path, map_location=device))
             else:
-                print(f" [Warning] Checkpoint not found at: {ckpt_path}! (Running untrained/random)")
+                target_p = os.path.join(args.ckpt_dir, fname)
+                print(f" [Warning] Checkpoint '{fname}' not found in any candidate directory!")
+                print(f"           Searched: {candidate_dirs}")
+                print(f"           (Running untrained adapter)")
             adapter.eval()
 
             # 1. Native Projection Baseline
@@ -256,3 +281,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

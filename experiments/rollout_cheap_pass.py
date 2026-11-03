@@ -236,14 +236,34 @@ def run_rollout_suite(args):
         print(f" EVALUATING ROLLOUT AT EXIT DEPTH E = {E}/{ctx.N} (Skipping {ctx.N - E} layers)")
         print("#" * 80)
 
-        # Load CheapPass Adapter
-        ckpt_path = os.path.join(args.ckpt_dir, f"adapter_E{E}_r{args.rank}_primary.pt")
+        # Load CheapPass Adapter (Search candidate directories)
+        fname = f"adapter_E{E}_r{args.rank}_primary.pt"
+        candidate_dirs = [
+            args.ckpt_dir,
+            "cheap_pass_out",
+            "cheap_pass_checkpoints",
+            "../cheap_pass_out",
+            "../cheap_pass_checkpoints",
+            "/kaggle/working/cheap_pass_out",
+            "/kaggle/working/cheap_pass_checkpoints",
+            "/kaggle/working/kv-cache-continuity/cheap_pass_out",
+            "/kaggle/working/kv-cache-continuity/cheap_pass_checkpoints",
+        ]
+        ckpt_path = None
+        for cd in candidate_dirs:
+            cand = os.path.join(cd, fname)
+            if os.path.exists(cand):
+                ckpt_path = cand
+                break
+
         adapter = CheapPassAdapter(ctx.d, list(range(E, ctx.N)), rank=args.rank).to(device)
-        if os.path.exists(ckpt_path):
-            print(f" [Checkpoint] Loaded adapter weights from: {ckpt_path}")
+        if ckpt_path is not None:
+            print(f" [Checkpoint] Successfully loaded adapter weights from: {ckpt_path}")
             adapter.load_state_dict(torch.load(ckpt_path, map_location=device))
         else:
-            print(f" [Warning] Checkpoint not found at {ckpt_path}! (Evaluating untrained)")
+            print(f" [Warning] Checkpoint '{fname}' not found in any candidate directory!")
+            print(f"           Searched: {candidate_dirs}")
+            print(f"           (Evaluating untrained adapter)")
         adapter.eval()
 
         methods = {
@@ -337,3 +357,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
