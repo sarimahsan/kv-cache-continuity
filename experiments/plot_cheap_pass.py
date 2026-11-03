@@ -14,6 +14,7 @@ import argparse
 import json
 import math
 import os
+import numpy as np
 import sys
 
 LN2 = math.log(2.0)  # 0.6931
