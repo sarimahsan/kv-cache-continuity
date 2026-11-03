@@ -319,15 +319,15 @@ def run_rollout_suite(args):
     with open(md_file, "w") as f:
         f.write("# End-to-End Autoregressive Rollout & Speculative Drafting Report\n\n")
         f.write("## 1. Multi-Step Autoregressive Continuation (New Tokens = 128)\n\n")
-        f.write("| Depth $E$ | Method | Match@16 (%) | Match@64 (%) | Match@128 (%) | First Divergence (tok) | $\\Delta\\text{NLL}$ | Gen PPL |\n")
+        f.write(r"| Depth $E$ | Method | Match@16 (%) | Match@64 (%) | Match@128 (%) | First Divergence (tok) | $\Delta\text{NLL}$ | Gen PPL |" + "\n")
         f.write("| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: |\n")
         for e_k, m_dict in results["rollout_results"].items():
             e_val = e_k.replace("E_", "")
             for m_name, d in m_dict.items():
                 f.write(f"| $E={e_val}$ | **{m_name}** | {d['match_at_16']:.1f}% | {d['match_at_64']:.1f}% | {d['match_at_128']:.1f}% | {d['first_divergence_pos']:.1f} | {d['delta_nll']:+.4f} | {d['gen_ppl']:.2f} |\n")
         
-        f.write("\n## 2. Speculative Drafting Acceptance ($\gamma = 3$ and $\gamma = 5$)\n\n")
-        f.write("| Depth $E$ | Method | $\\alpha$ ($\gamma=3$) | $\\tau$ ($\gamma=3$) | $\\alpha$ ($\gamma=5$) | $\\tau$ ($\gamma=5$) |\n")
+        f.write(r"\n## 2. Speculative Drafting Acceptance ($\gamma = 3$ and $\gamma = 5$)" + "\n\n")
+        f.write(r"| Depth $E$ | Method | $\alpha$ ($\gamma=3$) | $\tau$ ($\gamma=3$) | $\alpha$ ($\gamma=5$) | $\tau$ ($\gamma=5$) |" + "\n")
         f.write("| :---: | :--- | :---: | :---: | :---: | :---: |\n")
         for e_k, s_dict in results["speculative_results"].items():
             e_val = e_k.replace("E_", "")
