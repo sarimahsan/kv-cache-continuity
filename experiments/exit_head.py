@@ -141,10 +141,11 @@ def train_exit_head(
     device: torch.device,
     steps: int = 1000,
     lr: float = 2e-4,
-    batch_size: int = 4,
+    batch_size: int = 2,
+    chunk_len: int = 128,
     seed: int = 0,
 ) -> ExitHead:
-    """Trains H1 or H2 by distilling the terminal model's next-token distribution."""
+    """Trains H1 or H2 by distilling the terminal model's next-token distribution with chunked loss."""
     if head.mode == "H0":
         return head  # H0 requires zero training
 
@@ -162,22 +163,31 @@ def train_exit_head(
         with torch.no_grad():
             orc = ctx.oracle(batch)
             h_E = orc["hs"][depth].detach()
-            # Target is the full 36-layer model distribution
-            target_logits = orc["logits"][:, :-1].detach().float()
-            target_p = F.softmax(target_logits, dim=-1)
-            target_log_p = F.log_softmax(target_logits, dim=-1)
 
         optimizer.zero_grad()
-        # Compute candidate logits
         cand_h = head.forward(h_E[:, :-1])
-        cand_logits = ctx.m.lm_head(ctx.m.model.norm(cand_h)).float()
-        cand_log_p = F.log_softmax(cand_logits, dim=-1)
+        T_seq = cand_h.shape[1]
 
-        # Distillation loss: Forward KL = sum P_target * (log P_target - log P_cand)
-        kl_loss = (target_p * (target_log_p - cand_log_p)).sum(dim=-1).mean()
-        kl_loss.backward()
+        # Chunked distillation backward to keep VRAM minimal (<200MB autograd buffer)
+        for s_idx in range(0, T_seq, chunk_len):
+            e_idx = min(s_idx + chunk_len, T_seq)
+            c_chunk = ctx.m.lm_head(ctx.m.model.norm(cand_h[:, s_idx:e_idx])).float()
+            with torch.no_grad():
+                t_chunk = orc["logits"][:, s_idx:e_idx].float()
+                target_p = F.softmax(t_chunk, dim=-1)
+                target_log_p = F.log_softmax(t_chunk, dim=-1)
+
+            cand_log_p = F.log_softmax(c_chunk, dim=-1)
+            chunk_kl = (target_p * (target_log_p - cand_log_p)).sum(dim=-1).mean()
+            chunk_loss = chunk_kl * (e_idx - s_idx) / T_seq
+            chunk_loss.backward()
+
         torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
         optimizer.step()
+
+        del orc, h_E
+        if step % 50 == 0:
+            torch.cuda.empty_cache()
 
     head.eval()
     return head
@@ -202,7 +212,7 @@ def evaluate_exit_head_quality(
     test_tokens: torch.Tensor,
     depth: int,
     device: torch.device,
-    batch_size: int = 4,
+    batch_size: int = 2,
 ) -> Dict[str, float]:
     """
     Evaluates:
@@ -254,6 +264,9 @@ def evaluate_exit_head_quality(
         match_flat = match.flatten().cpu().numpy()
         all_conf.extend(max_probs)
         all_correct_match.extend(match_flat)
+
+        del orc, h_E, cand_h, cand_logits, target_logits
+        torch.cuda.empty_cache()
 
     mean_nll = float(np.mean(all_nll))
     ppl = float(math.exp(min(mean_nll, 20.0)))

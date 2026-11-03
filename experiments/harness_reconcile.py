@@ -113,7 +113,7 @@ def evaluate_condition(
     ctx: Ctx,
     tokens: torch.Tensor,
     depth: int,
-    batch_size: int = 4,
+    batch_size: int = 2,
     device: torch.device = torch.device("cpu"),
 ) -> Tuple[float, List[float], float, List[float]]:
     """Evaluates Native Projection vs Oracle under the given Ctx configuration."""
@@ -134,6 +134,9 @@ def evaluate_condition(
         kl_tok, top1_tok = compute_chunked_kl_and_top1(t_lg, p_lg, chunk_size=64)
         all_kl.extend(kl_tok.mean(dim=1).cpu().tolist())
         all_top1.extend((top1_tok.mean(dim=1) * 100.0).cpu().tolist())
+
+        del orc, native_kv, approx_logits, t_lg, p_lg
+        torch.cuda.empty_cache()
 
     kl_mean, kl_ci = compute_boot_ci(all_kl)
     top1_mean, top1_ci = compute_boot_ci(all_top1)

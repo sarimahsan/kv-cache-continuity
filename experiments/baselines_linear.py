@@ -3,24 +3,12 @@
 baselines_linear.py -- Track 1: Fair Linear Baselines, Post-Projection Scaling,
 and Closed-Form Ridge Regression for CheapPass.
 
-Implements all methods specified in Track 1:
-  1. Group S (Post-Projection Scaling, closed-form least squares on train):
-     - S1: Per-layer scalar on K and V (2 params/layer).
-     - S2: Per-KV-head scalar on K and V (4 params/layer for Qwen).
-     - S3: Per-channel affine (scale + shift) on K and V (4 * 256 params/layer).
-     - S4: Mean-drift correction on h: h_hat_l = h_E + (mu(h_l) - mu(h_E)).
-  2. Group R (Closed-Form Ridge Regression in fp64):
-     - R-h: Full-rank map from x = RMSNorm(h_E) to residual target (h_l - h_E) + bias.
-     - R-kv: Direct map from x to [K_l, V_l] pre-RoPE (2048 -> 512).
-     - R-h-r128: Low-rank SVD truncation of R-h to rank 128 (parameter-matched to CheapPass).
-     - lambda grid: {1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1} tuned on validation split.
-  3. Group L (Linear Gradient-Trained Adapters):
-     - L128: CheapPass with sigma = Identity, rank 128, W_up zero-init (3 seeds).
-     - L16: Same, rank 16.
-  4. References:
-     - CP128 (GELU, r=128, 3 seeds), CP16, Native, ZeroInit, Eviction, Oracle, DirectCopy.
-  5. Paired Bootstrap Confidence Intervals on differences (KL_method - KL_baseline).
-  6. Automated Pre-Registered Decision Rules evaluation.
+Memory-Optimized Edition for Tesla T4 (15GB VRAM):
+  - Uses get_oracle_states(..., need_logits=False) during fitting/training to avoid allocating 622MB logit buffers.
+  - Joint single-pass fitting for Group S (S1, S2, S3, S4) and Group R (R-h, R-kv, R-h-r128).
+  - Explicit torch.cuda.empty_cache() and batch_size=2 during training/fitting.
+  - Paired bootstrap confidence intervals on per-sequence differences (KL_method - KL_baseline).
+  - Automated evaluation of pre-registered decision rules.
 """
 
 import argparse
@@ -48,6 +36,23 @@ try:
     from tqdm import tqdm
 except ImportError:
     tqdm = None
+
+
+# ============================================================================
+# Memory-Efficient Oracle & Metric Helpers
+# ============================================================================
+
+@torch.no_grad()
+def get_oracle_states(ctx: Ctx, ids: torch.Tensor, need_logits: bool = False) -> Dict:
+    """Computes exact backbone states, optionally omitting the 622MB terminal logits buffer."""
+    h, cos, sin = ctx.embed(ids)
+    hs, kv = [h], []
+    for i in range(ctx.N):
+        h, kvi = ctx.layer_fwd(i, h, cos, sin)
+        hs.append(h)
+        kv.append(kvi)
+    logits = ctx.head(h) if need_logits else None
+    return dict(hs=hs, kv=kv, logits=logits, cos=cos, sin=sin)
 
 
 def compute_boot_ci(values: List[float], seed: int = 0, n_resamples: int = 1000) -> Tuple[float, List[float]]:
@@ -94,126 +99,12 @@ def compute_chunked_kl_and_top1(
 
 class PostProjectionScalingMethod:
     """
-    Base class for Group S: Applies learned/fitted transformations post-projection.
+    Applies fitted corrections post-projection (not cancelled by RMSNorm).
     """
     def __init__(self, mode: str = "S1", name: str = "post_proj"):
         self.mode = mode
         self.name = name
         self.params = {}
-
-    def fit(self, ctx: Ctx, train_tokens: torch.Tensor, depth: int, device: torch.device):
-        skipped_layers = list(range(depth, ctx.N))
-
-        if self.mode == "S4":
-            sum_h_E = torch.zeros(ctx.d, dtype=torch.float64, device=device)
-            sum_h_l = {l: torch.zeros(ctx.d, dtype=torch.float64, device=device) for l in skipped_layers}
-            total_tokens = 0
-
-            for i in range(0, min(len(train_tokens), 200), 4):
-                b = train_tokens[i : i + 4].to(device)
-                orc = ctx.oracle(b)
-                h_E = orc["hs"][depth].view(-1, ctx.d).to(torch.float64)
-                sum_h_E += h_E.sum(dim=0)
-                total_tokens += h_E.shape[0]
-                for l in skipped_layers:
-                    sum_h_l[l] += orc["hs"][l].view(-1, ctx.d).to(torch.float64).sum(dim=0)
-
-            mu_E = (sum_h_E / total_tokens).float()
-            mu_l = {l: (sum_h_l[l] / total_tokens).float() for l in skipped_layers}
-            self.params = {l: (mu_l[l] - mu_E) for l in skipped_layers}
-            return
-
-        accum = {
-            l: {
-                "dot_k": None, "norm_k": None,
-                "dot_v": None, "norm_v": None,
-                "sum_x_k": None, "sum_y_k": None, "sum_xx_k": None, "sum_xy_k": None,
-                "sum_x_v": None, "sum_y_v": None, "sum_xx_v": None, "sum_xy_v": None,
-                "count": 0
-            }
-            for l in skipped_layers
-        }
-
-        n_fit = min(len(train_tokens), 250)
-        for i in range(0, n_fit, 4):
-            b = train_tokens[i : i + 4].to(device)
-            orc = ctx.oracle(b)
-            h_E = orc["hs"][depth]
-            B, T, _ = h_E.shape
-
-            for l in skipped_layers:
-                lay = ctx.layers[l]
-                n = lay.input_layernorm(h_E)
-                k_hat = lay.self_attn.k_proj(n).view(B, T, ctx.Hkv, ctx.D).float()
-                v_hat = lay.self_attn.v_proj(n).view(B, T, ctx.Hkv, ctx.D).float()
-
-                n_true = lay.input_layernorm(orc["hs"][l])
-                k_true = lay.self_attn.k_proj(n_true).view(B, T, ctx.Hkv, ctx.D).float()
-                v_true = lay.self_attn.v_proj(n_true).view(B, T, ctx.Hkv, ctx.D).float()
-
-                st = accum[l]
-                st["count"] += B * T
-
-                if self.mode == "S1":
-                    dk = (k_hat * k_true).sum().item()
-                    nk = (k_hat * k_hat).sum().item()
-                    dv = (v_hat * v_true).sum().item()
-                    nv = (v_hat * v_hat).sum().item()
-                    st["dot_k"] = (st["dot_k"] or 0.0) + dk
-                    st["norm_k"] = (st["norm_k"] or 0.0) + nk
-                    st["dot_v"] = (st["dot_v"] or 0.0) + dv
-                    st["norm_v"] = (st["norm_v"] or 0.0) + nv
-
-                elif self.mode == "S2":
-                    dk = (k_hat * k_true).sum(dim=(0, 1, 3))
-                    nk = (k_hat * k_hat).sum(dim=(0, 1, 3))
-                    dv = (v_hat * v_true).sum(dim=(0, 1, 3))
-                    nv = (v_hat * v_hat).sum(dim=(0, 1, 3))
-                    st["dot_k"] = (st["dot_k"] if st["dot_k"] is not None else 0.0) + dk
-                    st["norm_k"] = (st["norm_k"] if st["norm_k"] is not None else 0.0) + nk
-                    st["dot_v"] = (st["dot_v"] if st["dot_v"] is not None else 0.0) + dv
-                    st["norm_v"] = (st["norm_v"] if st["norm_v"] is not None else 0.0) + nv
-
-                elif self.mode == "S3":
-                    kh_flat = k_hat.view(-1, ctx.Hkv * ctx.D)
-                    kt_flat = k_true.view(-1, ctx.Hkv * ctx.D)
-                    vh_flat = v_hat.view(-1, ctx.Hkv * ctx.D)
-                    vt_flat = v_true.view(-1, ctx.Hkv * ctx.D)
-
-                    st["sum_x_k"] = (st["sum_x_k"] if st["sum_x_k"] is not None else 0.0) + kh_flat.sum(0)
-                    st["sum_y_k"] = (st["sum_y_k"] if st["sum_y_k"] is not None else 0.0) + kt_flat.sum(0)
-                    st["sum_xx_k"] = (st["sum_xx_k"] if st["sum_xx_k"] is not None else 0.0) + (kh_flat * kh_flat).sum(0)
-                    st["sum_xy_k"] = (st["sum_xy_k"] if st["sum_xy_k"] is not None else 0.0) + (kh_flat * kt_flat).sum(0)
-
-                    st["sum_x_v"] = (st["sum_x_v"] if st["sum_x_v"] is not None else 0.0) + vh_flat.sum(0)
-                    st["sum_y_v"] = (st["sum_y_v"] if st["sum_y_v"] is not None else 0.0) + vt_flat.sum(0)
-                    st["sum_xx_v"] = (st["sum_xx_v"] if st["sum_xx_v"] is not None else 0.0) + (vh_flat * vh_flat).sum(0)
-                    st["sum_xy_v"] = (st["sum_xy_v"] if st["sum_xy_v"] is not None else 0.0) + (vh_flat * vt_flat).sum(0)
-
-        for l in skipped_layers:
-            st = accum[l]
-            if self.mode == "S1":
-                sk = st["dot_k"] / (st["norm_k"] + 1e-8)
-                sv = st["dot_v"] / (st["norm_v"] + 1e-8)
-                self.params[l] = {"sk": sk, "sv": sv}
-            elif self.mode == "S2":
-                sk = (st["dot_k"] / (st["norm_k"] + 1e-8)).view(1, 1, ctx.Hkv, 1)
-                sv = (st["dot_v"] / (st["norm_v"] + 1e-8)).view(1, 1, ctx.Hkv, 1)
-                self.params[l] = {"sk": sk, "sv": sv}
-            elif self.mode == "S3":
-                N = st["count"]
-                denom_k = N * st["sum_xx_k"] - st["sum_x_k"]**2 + 1e-8
-                ak = (N * st["sum_xy_k"] - st["sum_x_k"] * st["sum_y_k"]) / denom_k
-                bk = (st["sum_y_k"] - ak * st["sum_x_k"]) / N
-
-                denom_v = N * st["sum_xx_v"] - st["sum_x_v"]**2 + 1e-8
-                av = (N * st["sum_xy_v"] - st["sum_x_v"] * st["sum_y_v"]) / denom_v
-                bv = (st["sum_y_v"] - av * st["sum_x_v"]) / N
-
-                self.params[l] = {
-                    "ak": ak.view(1, 1, ctx.Hkv, ctx.D), "bk": bk.view(1, 1, ctx.Hkv, ctx.D),
-                    "av": av.view(1, 1, ctx.Hkv, ctx.D), "bv": bv.view(1, 1, ctx.Hkv, ctx.D),
-                }
 
     def kv(self, ctx: Ctx, orc: Dict, depth: int) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         h_E = orc["hs"][depth]
@@ -252,6 +143,136 @@ class PostProjectionScalingMethod:
         return out
 
 
+@torch.no_grad()
+def fit_all_group_s(
+    s_methods: Dict[str, PostProjectionScalingMethod],
+    ctx: Ctx,
+    train_tokens: torch.Tensor,
+    depth: int,
+    device: torch.device,
+    n_fit: int = 100,
+    batch_size: int = 2,
+):
+    """Jointly fits S1, S2, S3, S4 in a single low-memory pass over train tokens."""
+    print(f" [Group S] Jointly fitting S1, S2, S3, S4 in a single pass over {n_fit} sequences...")
+    skipped_layers = list(range(depth, ctx.N))
+
+    sum_h_E = torch.zeros(ctx.d, dtype=torch.float64, device=device)
+    sum_h_l = {l: torch.zeros(ctx.d, dtype=torch.float64, device=device) for l in skipped_layers}
+    total_tokens = 0
+
+    accum = {
+        l: {
+            "dot_k_s1": 0.0, "norm_k_s1": 0.0,
+            "dot_v_s1": 0.0, "norm_v_s1": 0.0,
+            "dot_k_s2": None, "norm_k_s2": None,
+            "dot_v_s2": None, "norm_v_s2": None,
+            "sum_x_k": None, "sum_y_k": None, "sum_xx_k": None, "sum_xy_k": None,
+            "sum_x_v": None, "sum_y_v": None, "sum_xx_v": None, "sum_xy_v": None,
+            "count": 0
+        }
+        for l in skipped_layers
+    }
+
+    n_samples = min(len(train_tokens), n_fit)
+    pbar = tqdm(range(0, n_samples, batch_size), desc="Fitting Group S", dynamic_ncols=True, leave=False) if tqdm else range(0, n_samples, batch_size)
+
+    for i in pbar:
+        b = train_tokens[i : i + batch_size].to(device)
+        orc = get_oracle_states(ctx, b, need_logits=False)
+        h_E = orc["hs"][depth]
+        B, T, _ = h_E.shape
+        total_tokens += B * T
+
+        # S4 accumulation
+        h_E_f64 = h_E.view(-1, ctx.d).to(torch.float64)
+        sum_h_E += h_E_f64.sum(dim=0)
+        for l in skipped_layers:
+            sum_h_l[l] += orc["hs"][l].view(-1, ctx.d).to(torch.float64).sum(dim=0)
+
+        # S1, S2, S3 accumulation
+        for l in skipped_layers:
+            lay = ctx.layers[l]
+            n_l = lay.input_layernorm(h_E)
+            k_hat = lay.self_attn.k_proj(n_l).view(B, T, ctx.Hkv, ctx.D).float()
+            v_hat = lay.self_attn.v_proj(n_l).view(B, T, ctx.Hkv, ctx.D).float()
+
+            n_true = lay.input_layernorm(orc["hs"][l])
+            k_true = lay.self_attn.k_proj(n_true).view(B, T, ctx.Hkv, ctx.D).float()
+            v_true = lay.self_attn.v_proj(n_true).view(B, T, ctx.Hkv, ctx.D).float()
+
+            st = accum[l]
+            st["count"] += B * T
+
+            # S1 (scalar)
+            st["dot_k_s1"] += (k_hat * k_true).sum().item()
+            st["norm_k_s1"] += (k_hat * k_hat).sum().item()
+            st["dot_v_s1"] += (v_hat * v_true).sum().item()
+            st["norm_v_s1"] += (v_hat * v_hat).sum().item()
+
+            # S2 (per-head)
+            dk2 = (k_hat * k_true).sum(dim=(0, 1, 3))
+            nk2 = (k_hat * k_hat).sum(dim=(0, 1, 3))
+            dv2 = (v_hat * v_true).sum(dim=(0, 1, 3))
+            nv2 = (v_hat * v_hat).sum(dim=(0, 1, 3))
+            st["dot_k_s2"] = (st["dot_k_s2"] if st["dot_k_s2"] is not None else 0.0) + dk2
+            st["norm_k_s2"] = (st["norm_k_s2"] if st["norm_k_s2"] is not None else 0.0) + nk2
+            st["dot_v_s2"] = (st["dot_v_s2"] if st["dot_v_s2"] is not None else 0.0) + dv2
+            st["norm_v_s2"] = (st["norm_v_s2"] if st["norm_v_s2"] is not None else 0.0) + nv2
+
+            # S3 (per-channel affine)
+            kh_flat = k_hat.view(-1, ctx.Hkv * ctx.D)
+            kt_flat = k_true.view(-1, ctx.Hkv * ctx.D)
+            vh_flat = v_hat.view(-1, ctx.Hkv * ctx.D)
+            vt_flat = v_true.view(-1, ctx.Hkv * ctx.D)
+
+            st["sum_x_k"] = (st["sum_x_k"] if st["sum_x_k"] is not None else 0.0) + kh_flat.sum(0)
+            st["sum_y_k"] = (st["sum_y_k"] if st["sum_y_k"] is not None else 0.0) + kt_flat.sum(0)
+            st["sum_xx_k"] = (st["sum_xx_k"] if st["sum_xx_k"] is not None else 0.0) + (kh_flat * kh_flat).sum(0)
+            st["sum_xy_k"] = (st["sum_xy_k"] if st["sum_xy_k"] is not None else 0.0) + (kh_flat * kt_flat).sum(0)
+
+            st["sum_x_v"] = (st["sum_x_v"] if st["sum_x_v"] is not None else 0.0) + vh_flat.sum(0)
+            st["sum_y_v"] = (st["sum_y_v"] if st["sum_y_v"] is not None else 0.0) + vt_flat.sum(0)
+            st["sum_xx_v"] = (st["sum_xx_v"] if st["sum_xx_v"] is not None else 0.0) + (vh_flat * vh_flat).sum(0)
+            st["sum_xy_v"] = (st["sum_xy_v"] if st["sum_xy_v"] is not None else 0.0) + (vh_flat * vt_flat).sum(0)
+
+        del orc, h_E
+        torch.cuda.empty_cache()
+
+    mu_E = (sum_h_E / total_tokens).float()
+    for l in skipped_layers:
+        st = accum[l]
+        # S1
+        s_methods["S1"].params[l] = {
+            "sk": st["dot_k_s1"] / (st["norm_k_s1"] + 1e-8),
+            "sv": st["dot_v_s1"] / (st["norm_v_s1"] + 1e-8),
+        }
+        # S2
+        s_methods["S2"].params[l] = {
+            "sk": (st["dot_k_s2"] / (st["norm_k_s2"] + 1e-8)).view(1, 1, ctx.Hkv, 1),
+            "sv": (st["dot_v_s2"] / (st["norm_v_s2"] + 1e-8)).view(1, 1, ctx.Hkv, 1),
+        }
+        # S3
+        N = st["count"]
+        denom_k = N * st["sum_xx_k"] - st["sum_x_k"]**2 + 1e-8
+        ak = (N * st["sum_xy_k"] - st["sum_x_k"] * st["sum_y_k"]) / denom_k
+        bk = (st["sum_y_k"] - ak * st["sum_x_k"]) / N
+
+        denom_v = N * st["sum_xx_v"] - st["sum_x_v"]**2 + 1e-8
+        av = (N * st["sum_xy_v"] - st["sum_x_v"] * st["sum_y_v"]) / denom_v
+        bv = (st["sum_y_v"] - av * st["sum_x_v"]) / N
+
+        s_methods["S3"].params[l] = {
+            "ak": ak.view(1, 1, ctx.Hkv, ctx.D), "bk": bk.view(1, 1, ctx.Hkv, ctx.D),
+            "av": av.view(1, 1, ctx.Hkv, ctx.D), "bv": bv.view(1, 1, ctx.Hkv, ctx.D),
+        }
+        # S4
+        mu_l = (sum_h_l[l] / total_tokens).float()
+        s_methods["S4"].params[l] = mu_l - mu_E
+
+    print(" [Group S] S1, S2, S3, S4 successfully fitted.")
+
+
 # ============================================================================
 # 2. Group R: Closed-Form Ridge Regression
 # ============================================================================
@@ -268,93 +289,14 @@ class RidgeRegressionMethod:
         self.weights = {}
         self.best_lambda = {}
 
-    def fit(
-        self,
-        ctx: Ctx,
-        train_tokens: torch.Tensor,
-        val_tokens: torch.Tensor,
-        depth: int,
-        device: torch.device,
-        lambda_grid: List[float] = [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1],
-    ):
-        skipped_layers = list(range(depth, ctx.N))
-        d_in = ctx.d
-
-        print(f" [{self.name}] Accumulating fp64 covariance matrices over train tokens...")
-        XtX = torch.zeros((d_in + 1, d_in + 1), dtype=torch.float64, device=device)
-        XtY = {l: None for l in skipped_layers}
-
-        n_fit = min(len(train_tokens), 250)
-        for i in range(0, n_fit, 4):
-            b = train_tokens[i : i + 4].to(device)
-            orc = ctx.oracle(b)
-            h_E = orc["hs"][depth]
-            norm_E = ctx.layers[depth].input_layernorm(h_E)
-            B, T, _ = norm_E.shape
-            X_batch = norm_E.view(-1, d_in).to(torch.float64)
-            ones = torch.ones((X_batch.shape[0], 1), dtype=torch.float64, device=device)
-            X_aug = torch.cat([X_batch, ones], dim=1)
-
-            XtX += X_aug.T @ X_aug
-
-            for l in skipped_layers:
-                if self.mode in ("R-h", "R-h-r128"):
-                    h_l = orc["hs"][l]
-                    Y_batch = (h_l - h_E).view(-1, d_in).to(torch.float64)
-                elif self.mode == "R-kv":
-                    lay = ctx.layers[l]
-                    n_l = lay.input_layernorm(orc["hs"][l])
-                    k_t = lay.self_attn.k_proj(n_l).view(-1, ctx.Hkv * ctx.D).to(torch.float64)
-                    v_t = lay.self_attn.v_proj(n_l).view(-1, ctx.Hkv * ctx.D).to(torch.float64)
-                    Y_batch = torch.cat([k_t, v_t], dim=1)
-
-                if XtY[l] is None:
-                    XtY[l] = torch.zeros((d_in + 1, Y_batch.shape[1]), dtype=torch.float64, device=device)
-                XtY[l] += X_aug.T @ Y_batch
-
-        print(f" [{self.name}] Selecting optimal regularization lambda on validation split...")
-        tr_XtX = torch.trace(XtX[:d_in, :d_in]).item()
-        I_reg = torch.eye(d_in + 1, dtype=torch.float64, device=device)
-        I_reg[-1, -1] = 0.0
-
-        for l in skipped_layers:
-            best_rel_mse = float("inf")
-            best_W = None
-            best_lam = lambda_grid[0]
-
-            for lam in lambda_grid:
-                alpha = lam * (tr_XtX / d_in)
-                A = XtX + alpha * I_reg
-                try:
-                    W_sol = torch.linalg.solve(A, XtY[l])
-                except Exception:
-                    W_sol = torch.linalg.lstsq(A, XtY[l]).solution
-
-                if self.mode == "R-h-r128" and self.rank is not None:
-                    W_feat = W_sol[:d_in, :]
-                    U, S, Vh = torch.linalg.svd(W_feat, full_matrices=False)
-                    W_lr = U[:, : self.rank] @ torch.diag(S[: self.rank]) @ Vh[: self.rank, :]
-                    W_sol = torch.cat([W_lr, W_sol[-1:, :]], dim=0)
-
-                rel_mse = self._eval_val_mse(ctx, val_tokens[:32], depth, l, W_sol, device)
-                if rel_mse < best_rel_mse:
-                    best_rel_mse = rel_mse
-                    best_W = W_sol.float()
-                    best_lam = lam
-
-            self.weights[l] = best_W
-            self.best_lambda[l] = best_lam
-
-        print(f" [{self.name}] Fitting complete. Best lambdas: {list(self.best_lambda.values())[:3]}...")
-
     def _eval_val_mse(self, ctx: Ctx, val_tokens: torch.Tensor, depth: int, target_layer: int, W: torch.Tensor, device: torch.device) -> float:
         total_err = 0.0
         total_denom = 0.0
         d_in = ctx.d
 
-        for i in range(0, len(val_tokens), 4):
-            b = val_tokens[i : i + 4].to(device)
-            orc = ctx.oracle(b)
+        for i in range(0, len(val_tokens), 2):
+            b = val_tokens[i : i + 2].to(device)
+            orc = get_oracle_states(ctx, b, need_logits=False)
             h_E = orc["hs"][depth]
             norm_E = ctx.layers[depth].input_layernorm(h_E)
             B, T, _ = norm_E.shape
@@ -376,6 +318,9 @@ class RidgeRegressionMethod:
             k_true, v_true = orc["kv"][target_layer]
             total_err += ((k_pred - k_true)**2).sum().item() + ((v_pred - v_true)**2).sum().item()
             total_denom += (k_true**2).sum().item() + (v_true**2).sum().item()
+
+            del orc, h_E, norm_E
+            torch.cuda.empty_cache()
 
         return total_err / (total_denom + 1e-8)
 
@@ -405,6 +350,113 @@ class RidgeRegressionMethod:
                 out.append((k_final, v_final))
 
         return out
+
+
+@torch.no_grad()
+def fit_all_group_r(
+    r_methods: Dict[str, RidgeRegressionMethod],
+    ctx: Ctx,
+    train_tokens: torch.Tensor,
+    val_tokens: torch.Tensor,
+    depth: int,
+    device: torch.device,
+    n_fit: int = 100,
+    batch_size: int = 2,
+    lambda_grid: List[float] = [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1],
+):
+    """Jointly accumulates fp64 covariance matrices and solves R-h, R-kv, and R-h-r128."""
+    print(f" [Group R] Jointly accumulating fp64 covariance matrices over {n_fit} sequences...")
+    skipped_layers = list(range(depth, ctx.N))
+    d_in = ctx.d
+
+    XtX = torch.zeros((d_in + 1, d_in + 1), dtype=torch.float64, device=device)
+    XtY_h = {l: torch.zeros((d_in + 1, d_in), dtype=torch.float64, device=device) for l in skipped_layers}
+    XtY_kv = {l: torch.zeros((d_in + 1, 2 * ctx.Hkv * ctx.D), dtype=torch.float64, device=device) for l in skipped_layers}
+
+    n_samples = min(len(train_tokens), n_fit)
+    pbar = tqdm(range(0, n_samples, batch_size), desc="Fitting Group R", dynamic_ncols=True, leave=False) if tqdm else range(0, n_samples, batch_size)
+
+    for i in pbar:
+        b = train_tokens[i : i + batch_size].to(device)
+        orc = get_oracle_states(ctx, b, need_logits=False)
+        h_E = orc["hs"][depth]
+        norm_E = ctx.layers[depth].input_layernorm(h_E)
+        B, T, _ = norm_E.shape
+        X_batch = norm_E.view(-1, d_in).to(torch.float64)
+        ones = torch.ones((X_batch.shape[0], 1), dtype=torch.float64, device=device)
+        X_aug = torch.cat([X_batch, ones], dim=1)
+
+        XtX += X_aug.T @ X_aug
+
+        for l in skipped_layers:
+            Y_h = (orc["hs"][l] - h_E).view(-1, d_in).to(torch.float64)
+            XtY_h[l] += X_aug.T @ Y_h
+
+            lay = ctx.layers[l]
+            n_l = lay.input_layernorm(orc["hs"][l])
+            k_t = lay.self_attn.k_proj(n_l).view(-1, ctx.Hkv * ctx.D).to(torch.float64)
+            v_t = lay.self_attn.v_proj(n_l).view(-1, ctx.Hkv * ctx.D).to(torch.float64)
+            Y_kv = torch.cat([k_t, v_t], dim=1)
+            XtY_kv[l] += X_aug.T @ Y_kv
+
+        del orc, h_E, norm_E
+        torch.cuda.empty_cache()
+
+    tr_XtX = torch.trace(XtX[:d_in, :d_in]).item()
+    I_reg = torch.eye(d_in + 1, dtype=torch.float64, device=device)
+    I_reg[-1, -1] = 0.0
+
+    print(" [Group R] Selecting optimal regularization lambda on validation split...")
+    for l in skipped_layers:
+        best_mse_h = float("inf")
+        best_W_h = None
+        best_lam_h = lambda_grid[0]
+
+        best_mse_kv = float("inf")
+        best_W_kv = None
+        best_lam_kv = lambda_grid[0]
+
+        for lam in lambda_grid:
+            alpha = lam * (tr_XtX / d_in)
+            A = XtX + alpha * I_reg
+            try:
+                W_h = torch.linalg.solve(A, XtY_h[l])
+            except Exception:
+                W_h = torch.linalg.lstsq(A, XtY_h[l]).solution
+
+            mse_h = r_methods["R-h"]._eval_val_mse(ctx, val_tokens[:16], depth, l, W_h, device)
+            if mse_h < best_mse_h:
+                best_mse_h = mse_h
+                best_W_h = W_h.float()
+                best_lam_h = lam
+
+            try:
+                W_kv = torch.linalg.solve(A, XtY_kv[l])
+            except Exception:
+                W_kv = torch.linalg.lstsq(A, XtY_kv[l]).solution
+
+            mse_kv = r_methods["R-kv"]._eval_val_mse(ctx, val_tokens[:16], depth, l, W_kv, device)
+            if mse_kv < best_mse_kv:
+                best_mse_kv = mse_kv
+                best_W_kv = W_kv.float()
+                best_lam_kv = lam
+
+        r_methods["R-h"].weights[l] = best_W_h
+        r_methods["R-h"].best_lambda[l] = best_lam_h
+
+        # Low-rank truncation for R-h-r128
+        W_feat = best_W_h[:d_in, :].to(torch.float64)
+        U, S, Vh = torch.linalg.svd(W_feat, full_matrices=False)
+        r = 128
+        W_lr = (U[:, :r] @ torch.diag(S[:r]) @ Vh[:r, :]).float()
+        W_r128 = torch.cat([W_lr, best_W_h[-1:, :]], dim=0)
+        r_methods["R-h-r128"].weights[l] = W_r128
+        r_methods["R-h-r128"].best_lambda[l] = best_lam_h
+
+        r_methods["R-kv"].weights[l] = best_W_kv
+        r_methods["R-kv"].best_lambda[l] = best_lam_kv
+
+    print(" [Group R] R-h, R-kv, R-h-r128 successfully fitted and regularized.")
 
 
 # ============================================================================
@@ -448,9 +500,9 @@ def train_gradient_adapter(
     val_tokens: torch.Tensor,
     depth: int,
     device: torch.device,
-    steps: int = 1000,
+    steps: int = 800,
     lr: float = 1e-4,
-    batch_size: int = 4,
+    batch_size: int = 2,
     seed: int = 0,
 ) -> nn.Module:
     set_seed(seed)
@@ -466,7 +518,7 @@ def train_gradient_adapter(
         batch = train_tokens[idx : idx + batch_size].to(device)
 
         with torch.no_grad():
-            orc = ctx.oracle(batch)
+            orc = get_oracle_states(ctx, batch, need_logits=False)
             h_E = orc["hs"][depth]
             cos, sin = orc["cos"], orc["sin"]
 
@@ -489,6 +541,10 @@ def train_gradient_adapter(
         torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1.0)
         optimizer.step()
 
+        del orc, h_E
+        if step % 50 == 0:
+            torch.cuda.empty_cache()
+
     adapter.eval()
     return adapter
 
@@ -505,18 +561,16 @@ def evaluate_method_per_sequence(
     depth: int,
     exact_mask: Optional[torch.Tensor] = None,
     device: torch.device = torch.device("cpu"),
-    batch_size: int = 4,
+    batch_size: int = 2,
 ) -> Tuple[List[float], List[float]]:
-    """Evaluates method returning per-sequence KL and Top-1 match lists."""
     all_kl = []
     all_top1 = []
 
     for i in range(0, len(tokens), batch_size):
         batch = tokens[i : i + batch_size].to(device)
-        orc = ctx.oracle(batch)
+        orc = get_oracle_states(ctx, batch, need_logits=True)
 
         if method_instance is None:
-            # Oracle baseline
             lg = orc["logits"][:, :-1]
         else:
             synth_kv = method_instance.kv(ctx, orc, depth)
@@ -527,6 +581,9 @@ def evaluate_method_per_sequence(
 
         all_kl.extend(kl_tok.mean(dim=1).cpu().tolist())
         all_top1.extend((top1_tok.mean(dim=1) * 100.0).cpu().tolist())
+
+        del orc, lg, t_lg
+        torch.cuda.empty_cache()
 
     return all_kl, all_top1
 
@@ -620,44 +677,37 @@ def run_track1_benchmark(
     ctx = Ctx(model)
     primary_depth = 18
 
-    # 1. Fit Group S Methods
-    print("\n --- Fitting Group S Methods (S1, S2, S3, S4) at E=18 ---")
+    # 1. Joint Fitting for Group S
     s_methods = {
         "S1": PostProjectionScalingMethod("S1", "S1_scalar"),
         "S2": PostProjectionScalingMethod("S2", "S2_per_head"),
         "S3": PostProjectionScalingMethod("S3", "S3_affine"),
         "S4": PostProjectionScalingMethod("S4", "S4_mean_drift"),
     }
-    for name, m in s_methods.items():
-        print(f" Fitting {name}...")
-        m.fit(ctx, data.train, primary_depth, device)
+    fit_all_group_s(s_methods, ctx, data.train, primary_depth, device, n_fit=100, batch_size=2)
 
-    # 2. Fit Group R Methods
-    print("\n --- Fitting Group R Methods (R-h, R-kv, R-h-r128) at E=18 ---")
+    # 2. Joint Fitting for Group R
     r_methods = {
         "R-h": RidgeRegressionMethod("R-h", name="R-h_full_rank"),
         "R-kv": RidgeRegressionMethod("R-kv", name="R-kv_direct"),
         "R-h-r128": RidgeRegressionMethod("R-h-r128", rank=128, name="R-h-r128_svd"),
     }
-    for name, m in r_methods.items():
-        print(f" Fitting {name}...")
-        m.fit(ctx, data.train, data.val, primary_depth, device)
+    fit_all_group_r(r_methods, ctx, data.train, data.val, primary_depth, device, n_fit=100, batch_size=2)
 
     # 3. Train Group L & CP Adapters (3 Seeds)
     print("\n --- Training Group L and References (3 Seeds) at E=18 ---")
     skipped_18 = list(range(primary_depth, ctx.N))
     l128_adapters = [
-        train_gradient_adapter(ctx, LinearCheapPassAdapter(ctx.d, skipped_18, rank=128), data.train, data.val, primary_depth, device, seed=s)
+        train_gradient_adapter(ctx, LinearCheapPassAdapter(ctx.d, skipped_18, rank=128), data.train, data.val, primary_depth, device, seed=s, batch_size=2)
         for s in [0, 1, 2]
     ]
-    l16_adapter = train_gradient_adapter(ctx, LinearCheapPassAdapter(ctx.d, skipped_18, rank=16), data.train, data.val, primary_depth, device, seed=0)
+    l16_adapter = train_gradient_adapter(ctx, LinearCheapPassAdapter(ctx.d, skipped_18, rank=16), data.train, data.val, primary_depth, device, seed=0, batch_size=2)
     cp128_adapters = [
-        train_gradient_adapter(ctx, CheapPassAdapter(ctx.d, skipped_18, rank=128), data.train, data.val, primary_depth, device, seed=s)
+        train_gradient_adapter(ctx, CheapPassAdapter(ctx.d, skipped_18, rank=128), data.train, data.val, primary_depth, device, seed=s, batch_size=2)
         for s in [0, 1, 2]
     ]
-    cp16_adapter = train_gradient_adapter(ctx, CheapPassAdapter(ctx.d, skipped_18, rank=16), data.train, data.val, primary_depth, device, seed=0)
+    cp16_adapter = train_gradient_adapter(ctx, CheapPassAdapter(ctx.d, skipped_18, rank=16), data.train, data.val, primary_depth, device, seed=0, batch_size=2)
 
-    # Construct evaluation catalog for E=18
     eval_catalog_18 = {
         "Native": Native(),
         "DirectCopy": Direct(),
@@ -686,7 +736,7 @@ def run_track1_benchmark(
     seq_kl_store = {}
 
     for name, m in eval_catalog_18.items():
-        kl_seq, top1_seq = evaluate_method_per_sequence(ctx, m, data.test, primary_depth, device=device)
+        kl_seq, top1_seq = evaluate_method_per_sequence(ctx, m, data.test, primary_depth, device=device, batch_size=2)
         m_kl, ci_kl = compute_boot_ci(kl_seq)
         m_top, ci_top = compute_boot_ci(top1_seq)
         seq_kl_store[name] = kl_seq
@@ -728,7 +778,6 @@ def run_track1_benchmark(
     print(" ==================================================================")
     decision_outcomes = {}
 
-    # Rule 1: S-methods close >= 50% of CP128 gain?
     best_s_name = min(["S1", "S2", "S3", "S4"], key=lambda k: table_a_results[k]["kl_mean"])
     best_s_gain = kl_native - table_a_results[best_s_name]["kl_mean"]
     s_gap_closed_pct = (best_s_gain / cp_gain) * 100.0
@@ -741,7 +790,6 @@ def run_track1_benchmark(
     }
     print(f" Decision 1 (Scale/Offset): Best {best_s_name} closed {s_gap_closed_pct:.1f}% of CP gain. -> {decision_outcomes['rule1_scale_offset_explains_gain']['verdict']}")
 
-    # Rule 2: Closed-form ridge closes >= 90% of CP128 gain?
     best_r_name = min(["R-h", "R-kv", "R-h-r128"], key=lambda k: table_a_results[k]["kl_mean"])
     best_r_gain = kl_native - table_a_results[best_r_name]["kl_mean"]
     r_gap_closed_pct = (best_r_gain / cp_gain) * 100.0
@@ -754,7 +802,6 @@ def run_track1_benchmark(
     }
     print(f" Decision 2 (Closed-Form): Best {best_r_name} closed {r_gap_closed_pct:.1f}% of CP gain. -> {decision_outcomes['rule2_closed_form_suffices']['verdict']}")
 
-    # Rule 3: L128 within paired CI of CP128?
     l128_cp_ci = paired_results["L128_s0"]["diff_vs_cp128"]["ci95"]
     rule3_pass = (l128_cp_ci[0] <= 0.0 <= l128_cp_ci[1])
     decision_outcomes["rule3_gelu_unnecessary"] = {
@@ -764,7 +811,6 @@ def run_track1_benchmark(
     }
     print(f" Decision 3 (Nonlinearity): L128 vs CP128 CI = {l128_cp_ci}. -> {decision_outcomes['rule3_gelu_unnecessary']['verdict']}")
 
-    # Rule 4: CP128 beats L128 and all R with paired CI excluding 0 and >= 10% relative reduction?
     rel_red_l128 = (table_a_results["L128_s0"]["kl_mean"] - kl_cp128) / table_a_results["L128_s0"]["kl_mean"]
     rule4_pass = (l128_cp_ci[0] > 0.0 and rel_red_l128 >= 0.10)
     decision_outcomes["rule4_nonlinearity_matters"] = {
@@ -775,7 +821,6 @@ def run_track1_benchmark(
     print(f" Decision 4 (Strong Nonlinearity): -> {decision_outcomes['rule4_nonlinearity_matters']['verdict']}")
     print(" ==================================================================\n")
 
-    # Save Output JSON
     full_output = {
         "meta": {"model": model_name, "depths": depths, "n_test": len(data.test)},
         "table_a_E18_p100": table_a_results,

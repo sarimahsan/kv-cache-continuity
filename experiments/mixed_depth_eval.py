@@ -89,7 +89,7 @@ def evaluate_mixed_depth_teacher_forced(
     E: int,
     theta: float,
     device: torch.device,
-    batch_size: int = 4,
+    batch_size: int = 2,
 ) -> Dict[str, float]:
     """
     Two-pass teacher-forced evaluation for a single (theta, condition) point.
@@ -174,6 +174,9 @@ def evaluate_mixed_depth_teacher_forced(
 
         match = (composite_preds == oracle_preds).float()
         all_top1.extend((match.mean(dim=1) * 100.0).cpu().tolist())
+
+        del orc, oracle_logits, exit_logits, terminal_logits, composite_logits, mixed_kv
+        torch.cuda.empty_cache()
 
     exit_rate = total_exited_tokens / max(1, total_tokens)
     mean_nll = float(np.mean(all_nll))
