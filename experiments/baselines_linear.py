@@ -127,8 +127,8 @@ class PostProjectionScalingMethod:
 
             p = self.params[l]
             if self.mode == "S1":
-                k_scaled = k_proj * p["sk"]
-                v_scaled = v_proj * p["sv"]
+                k_scaled = (k_proj * p["sk"]).to(k_proj.dtype)
+                v_scaled = (v_proj * p["sv"]).to(v_proj.dtype)
             elif self.mode == "S2":
                 k_scaled = k_proj * p["sk"].to(k_proj.device, dtype=k_proj.dtype)
                 v_scaled = v_proj * p["sv"].to(v_proj.device, dtype=v_proj.dtype)
@@ -304,7 +304,7 @@ class RidgeRegressionMethod:
             ones = torch.ones((X_flat.shape[0], 1), dtype=torch.float64, device=device)
             X_aug = torch.cat([X_flat, ones], dim=1)
 
-            pred_Y = (X_aug @ W).float()
+            pred_Y = (X_aug @ W.to(X_aug.dtype)).to(h_E.dtype)
 
             if self.mode in ("R-h", "R-h-r128"):
                 h_hat_l = h_E + pred_Y.view(B, T, d_in)
