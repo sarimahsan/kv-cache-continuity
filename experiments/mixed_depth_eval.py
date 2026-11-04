@@ -302,11 +302,11 @@ def run_free_running_mixed_depth(
             total_steps += 1
             if conf.item() >= theta:
                 chosen_tok = exit_next
-                exited_flags.append(True)
+                is_exit = True
                 total_exited += 1
             else:
-                exited_flags.append(False)
-                any_past_exited = any(exited_flags[:-1])
+                is_exit = False
+                any_past_exited = any(exited_flags)
                 if condition_name == "Oracle-KV" or not any_past_exited:
                     chosen_tok = orc_c["logits"][:, -1].argmax(-1, keepdim=True)
                 elif condition_name == "Eviction":
@@ -331,6 +331,8 @@ def run_free_running_mixed_depth(
                         mixed_kv.append((k_mix, v_mix))
                     term_lg = ctx.approx(orc_c, E, mixed_kv, last_only=True)[:, -1]
                     chosen_tok = term_lg.argmax(-1, keepdim=True)
+
+            exited_flags.append(is_exit)
 
             cur = torch.cat([cur, chosen_tok], dim=1)
             tok_id = int(chosen_tok.item())
