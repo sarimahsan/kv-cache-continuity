@@ -151,9 +151,15 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def apply_rope(k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    # k: [B, H_kv, 1, D]
-    # cos, sin: [B, 1, D] or [1, 1, D]
-    return (k * cos.unsqueeze(1)) + (rotate_half(k) * sin.unsqueeze(1))
+    """Apply rotary embeddings while preserving any non-rotary head dimensions."""
+    rotary_dim = min(k.shape[-1], cos.shape[-1], sin.shape[-1])
+    k_rot = k[..., :rotary_dim]
+    cos = cos[..., :rotary_dim].unsqueeze(1)
+    sin = sin[..., :rotary_dim].unsqueeze(1)
+    rotated = (k_rot * cos) + (rotate_half(k_rot) * sin)
+    if rotary_dim == k.shape[-1]:
+        return rotated
+    return torch.cat((rotated, k[..., rotary_dim:]), dim=-1)
 
 
 class ModelContext:
@@ -167,10 +173,29 @@ class ModelContext:
         self.d = self.cfg.hidden_size
         self.H_q = self.cfg.num_attention_heads
         self.H_kv = getattr(self.cfg, "num_key_value_heads", self.H_q)
-        self.D = getattr(self.cfg, "head_dim", self.d // self.H_q)
+        # Derive this from the projection modules.  Some Llama checkpoints expose
+        # a stale/incompatible config head_dim, while the projections are the
+        # dimensions used by attention at runtime.
+        self.D = self.layers[0].self_attn.q_proj.out_features // self.H_q
         self.rotary = getattr(model.model, "rotary_emb", None)
         self.device = next(model.parameters()).device
         self.dtype = next(model.parameters()).dtype
+
+    def position_embeddings(
+        self, hidden_states: torch.Tensor, position_ids: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return rotary tensors with the head dimension expected by attention."""
+        cos, sin = self.rotary(hidden_states, position_ids)
+        if cos.shape[-1] > self.D:
+            cos = cos[..., : self.D]
+            sin = sin[..., : self.D]
+        elif cos.shape[-1] < self.D:
+            # Support checkpoints using partial rotary dimensions.  The
+            # non-rotary tail must be an identity transform for attention.
+            pad = self.D - cos.shape[-1]
+            cos = F.pad(cos, (0, pad), value=1.0)
+            sin = F.pad(sin, (0, pad), value=0.0)
+        return cos, sin
 
     def compute_cosine_similarity(self, h_in: torch.Tensor, h_out: torch.Tensor) -> float:
         """Computes River's State Transition Similarity: cos(h_in, h_out)."""
@@ -299,8 +324,8 @@ def generate_under_policy(
         
         # Compute position embeddings for rotary attention
         if ctx.rotary is not None:
-            pos_emb = ctx.rotary(h, pos_ids)
-            cos, sin = pos_emb
+            cos, sin = ctx.position_embeddings(h, pos_ids)
+            pos_emb = (cos, sin)
         else:
             pos_emb = None
             cos, sin = None, None
