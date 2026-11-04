@@ -273,8 +273,8 @@ class CalibratedAlignment:
         
         # Apply fitted scale factors if available
         if layer_idx in self.scales:
-            sk = self.scales[layer_idx].get("sk", 1.0)
-            sv = self.scales[layer_idx].get("sv", 1.0)
+            sk = max(min(self.scales[layer_idx].get("sk", 1.0), 3.0), 0.2)
+            sv = max(min(self.scales[layer_idx].get("sv", 1.0), 3.0), 0.2)
             k_proj = k_proj * sk
             v_proj = v_proj * sv
             
@@ -289,6 +289,7 @@ def calibrate_model_alignments(
     out_dir: str,
     n_seqs: int = 150,
     seq_len: int = 256,
+    force_recalibrate: bool = False,
 ) -> Dict[int, CalibratedAlignment]:
     """
     Fits closed-form Ridge alignment for exit heads and S1 scale factors across depths.
@@ -299,7 +300,7 @@ def calibrate_model_alignments(
     alignments = {}
     
     # Check if all exist on disk
-    all_exist = True
+    all_exist = not force_recalibrate
     for E in depths:
         fn = os.path.join(ckpt_dir, f"align_E{E}.pt")
         if not os.path.exists(fn):
@@ -378,10 +379,18 @@ def calibrate_model_alignments(
                     scale_acc[E][l]["norm_v"] += norm_v
 
     # Solve Ridge systems and finalize scale factors
-    lam = 1e-2
     for E in depths:
-        reg = lam * torch.eye(d, dtype=torch.float64, device=device)
+        tr_E = torch.trace(XtX[E]).item()
+        # Scale lambda relative to mean eigenvalue: alpha * tr(X^T X) / d
+        lam_eff = max(0.05 * (tr_E / d), 1.0)
+        reg = lam_eff * torch.eye(d, dtype=torch.float64, device=device)
         W_sol = torch.linalg.solve(XtX[E] + reg, XtY[E]).to(torch.float32)
+        
+        # Soft norm stabilization: ensure ||W||_F does not explode
+        wf = torch.norm(W_sol).item()
+        if wf > 10.0:
+            W_sol = W_sol * (10.0 / wf)
+            wf = 10.0
         
         scales = {}
         for l in range(E, ctx.N):
@@ -776,6 +785,7 @@ def main():
     parser.add_argument("--depths", type=str, default="4,8,12", help="Comma list of exit depths E")
     parser.add_argument("--tau_sweep", type=str, default="0.5,0.7", help="River cosine thresholds")
     parser.add_argument("--selftest", action="store_true", help="Run self-test with mock data")
+    parser.add_argument("--recalibrate", action="store_true", help="Force refitting exit heads and S1 scale factors")
     parser.add_argument("--out_dir", type=str, default="results/river_conditions")
     args = parser.parse_args()
 
@@ -805,7 +815,13 @@ def main():
         ctx = ModelContext(model, tok)
 
     # Automated Calibration: Fit closed-form exit heads and CheapPass S1 scale factors
-    alignments = calibrate_model_alignments(ctx, depths, out_dir=args.out_dir, n_seqs=120 if not args.selftest else 10)
+    alignments = calibrate_model_alignments(
+        ctx,
+        depths,
+        out_dir=args.out_dir,
+        n_seqs=120 if not args.selftest else 15,
+        force_recalibrate=args.recalibrate or args.selftest,
+    )
 
     results = {
         "meta": {
