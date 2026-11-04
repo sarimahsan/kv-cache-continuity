@@ -44,28 +44,20 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "experiments"))
 # 1. Hardware Profiling & Cost Accounting
 # ============================================================================
 
-def compute_model_flops_and_bytes(cfg, seq_len: int = 1) -> Dict[str, float]:
-    """
-    Computes analytical FLOPs and parameter bytes per token for a single transformer layer
-    and for CheapPass adapters.
-    """
+def compute_model_flops_and_bytes(cfg) -> Dict[str, float]:
+    """Computes analytical FLOPs and parameter bytes per token."""
     d = cfg.hidden_size
     H_q = cfg.num_attention_heads
     H_kv = getattr(cfg, "num_key_value_heads", H_q)
     D = getattr(cfg, "head_dim", d // H_q)
     d_mlp = getattr(cfg, "intermediate_size", 4 * d)
     
-    # Standard Llama layer FLOPs (Attention Q,K,V,O projections + SwiGLU MLP gate, up, down)
     attn_flops = 2 * (d * (H_q * D) + 2 * d * (H_kv * D) + (H_q * D) * d)
-    mlp_flops = 2 * (3 * d * d_mlp)  # SwiGLU has gate_proj, up_proj, down_proj
+    mlp_flops = 2 * (3 * d * d_mlp)
     layer_flops = attn_flops + mlp_flops
     
-    # CheapPass rank-128 adapter FLOPs per skipped layer:
-    # W_down: 2 * d * r, W_up: 2 * r * (2 * H_kv * D)
     r = 128
     cp_flops_per_layer = 2 * (d * r) + 2 * (r * 2 * H_kv * D)
-    
-    # Layer weights bytes (FP16: 2 bytes per param)
     layer_params = (d * (H_q * D) + 2 * d * (H_kv * D) + (H_q * D) * d) + (3 * d * d_mlp)
     layer_bytes = layer_params * 2
     cp_bytes_per_layer = (d * r + r * 2 * H_kv * D) * 2
@@ -105,27 +97,16 @@ Answer: They sell 30 / 2 = 15 chocolate cakes, leaving 30 - 15 = 15 chocolate ca
 
 """
 
-MATH_4SHOT_PROMPT = """Problem: Find the degree of the polynomial $2x^3 - 5x^2 + 7x - 1$.
-Answer: The degree is the highest exponent, which is 3.
-The answer is \\boxed{3}
-
-Problem: Solve for $x$: $3x + 12 = 27$.
-Answer: Subtract 12: $3x = 15$. Divide by 3: $x = 5$.
-The answer is \\boxed{5}
-
-Problem: What is the sum of the angles in a triangle?
-Answer: The sum of the interior angles in any Euclidean triangle is 180 degrees.
-The answer is \\boxed{180}
-
-Problem: Calculate $7! / 5!$.
-Answer: $7! / 5! = 7 \\times 6 = 42$.
-The answer is \\boxed{42}
-
-"""
-
 
 def extract_gsm8k_answer(text: str) -> Optional[str]:
     """Extracts numerical answer following '####' or trailing numbers."""
+    if not text:
+        return None
+    # Truncate at trailing question if model continued generating
+    for stop_str in ["\nQuestion:", "\n\nQuestion:", "Question:"]:
+        if stop_str in text:
+            text = text.split(stop_str)[0]
+            
     if "####" in text:
         match = re.findall(r"####\s*(-?[0-9\.,]+)", text)
         if match:
@@ -135,12 +116,21 @@ def extract_gsm8k_answer(text: str) -> Optional[str]:
         return match[-1].replace(",", "").strip()
     match = re.findall(r"(-?[0-9\.,]+)", text)
     if match:
-        return match[-1].replace(",", "").strip()
+        # Strip trailing dot if present
+        ans = match[-1].replace(",", "").strip()
+        if ans.endswith("."):
+            ans = ans[:-1]
+        return ans
     return None
 
 
 def extract_math_answer(text: str) -> Optional[str]:
     """Extracts answer inside \\boxed{...} or final equation."""
+    if not text:
+        return None
+    for stop_str in ["\nProblem:", "\n\nProblem:", "Problem:"]:
+        if stop_str in text:
+            text = text.split(stop_str)[0]
     match = re.findall(r"\\boxed\{([^}]+)\}", text)
     if match:
         return match[-1].strip()
@@ -150,20 +140,21 @@ def extract_math_answer(text: str) -> Optional[str]:
     return None
 
 
-def evaluate_humaneval_code(prompt: str, generated: str, test_code: str) -> bool:
-    """Executes generated code in a local Python scope against test assertions."""
-    full_code = prompt + generated + "\n" + test_code
-    try:
-        scope = {}
-        exec(full_code, scope)
-        return True
-    except Exception:
-        return False
-
-
 # ============================================================================
 # 3. Model Wrapper & State-Transition Monitoring
 # ============================================================================
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rope(k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    # k: [B, H_kv, 1, D]
+    # cos, sin: [B, 1, D] or [1, 1, D]
+    return (k * cos.unsqueeze(1)) + (rotate_half(k) * sin.unsqueeze(1))
+
 
 class ModelContext:
     """Wraps HuggingFace CausalLM model for layerwise activation capture and cache control."""
@@ -183,7 +174,6 @@ class ModelContext:
 
     def compute_cosine_similarity(self, h_in: torch.Tensor, h_out: torch.Tensor) -> float:
         """Computes River's State Transition Similarity: cos(h_in, h_out)."""
-        # h: [B, 1, d]
         v_in = h_in.squeeze().float()
         v_out = h_out.squeeze().float()
         norm_in = torch.norm(v_in, p=2) + 1e-8
@@ -211,12 +201,10 @@ class CheapPassLinearAdapter(nn.Module):
         self.up_k = nn.ModuleDict({str(l): nn.Linear(rank, self.kv_dim, bias=False) for l in skipped_layers})
         self.up_v = nn.ModuleDict({str(l): nn.Linear(rank, self.kv_dim, bias=False) for l in skipped_layers})
         
-        # Zero-initialize up projections
         for mod in list(self.up_k.values()) + list(self.up_v.values()):
             nn.init.zeros_(mod.weight)
 
     def forward(self, h_E: torch.Tensor, layer_idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Returns (K_pred, V_pred) for specified layer."""
         r = self.down(h_E.float())
         k_pred = self.up_k[str(layer_idx)](r).to(h_E.dtype)
         v_pred = self.up_v[str(layer_idx)](r).to(h_E.dtype)
@@ -224,7 +212,7 @@ class CheapPassLinearAdapter(nn.Module):
 
 
 class ExitHead(nn.Module):
-    """Tuned lens or linear exit head at depth E."""
+    """Linear tuned lens exit head at depth E."""
     def __init__(self, d_model: int):
         super().__init__()
         self.linear = nn.Linear(d_model, d_model, bias=False)
@@ -242,8 +230,22 @@ class ExitHead(nn.Module):
 
 
 # ============================================================================
-# 5. Core Generation & Policy Runner
+# 5. Core Generation & Policy Runner with True Layer Skipping
 # ============================================================================
+
+def update_kv_cache(past_key_values, k_state: torch.Tensor, v_state: torch.Tensor, layer_idx: int):
+    """Inserts or appends key and value states into past_key_values across cache implementations."""
+    if hasattr(past_key_values, "update"):
+        past_key_values.update(k_state, v_state, layer_idx=layer_idx)
+    elif isinstance(past_key_values, (list, tuple)):
+        # Legacy tuple structure
+        if layer_idx < len(past_key_values):
+            k_old, v_old = past_key_values[layer_idx]
+            past_key_values[layer_idx] = (
+                torch.cat([k_old, k_state], dim=2),
+                torch.cat([v_old, v_state], dim=2),
+            )
+
 
 @torch.no_grad()
 def generate_under_policy(
@@ -259,12 +261,13 @@ def generate_under_policy(
     available_depths: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """
-    Executes autoregressive generation with exact tracking of executed layers per token.
-    Supports Policy A (Fixed E), Policy B (River Cosine Gate rounded to trained E),
-    and Policy C (NativeProj, DirectCopy, FullBackbone).
+    Executes true layer-skipping autoregressive generation with exact tracking of executed layers.
+    Bypasses upper transformer layers E..N-1 and reconstructs KV caches via CheapPass/Native/Direct.
     """
     if stop_tokens is None:
         stop_tokens = [ctx.tok.eos_token_id] if ctx.tok.eos_token_id is not None else []
+    if available_depths is None:
+        available_depths = [target_depth]
 
     device = ctx.device
     curr_ids = prompt_ids.to(device)
@@ -273,68 +276,137 @@ def generate_under_policy(
     executed_layers_list = []
     generated_tokens = []
     
-    # Pre-fill pass (River runs full prefill or sequence-level exit)
-    # We maintain standard full prefill cache for past context
+    # 1. Full Pre-fill Pass
     outputs = ctx.m(curr_ids, use_cache=True)
     past_key_values = outputs.past_key_values
     next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
     generated_tokens.append(next_token.item())
-    executed_layers_list.append(ctx.N)  # Prefill runs full model
+    executed_layers_list.append(ctx.N)
     
-    # Generation loop
+    cur_pos = prompt_len
+    stop_strings = ["\nQuestion:", "\n\nQuestion:", "Question:", "\n\n"]
+    
+    # 2. Token Generation Loop
     for step in range(max_new_tokens - 1):
         if next_token.item() in stop_tokens:
             break
             
-        cur_input = next_token
+        cur_input = next_token  # [1, 1]
+        pos_ids = torch.tensor([[cur_pos]], device=device, dtype=torch.long)
         
-        # Decide exit depth for this generated token
-        chosen_exit_depth = ctx.N
+        # Embed single token
+        h = ctx.m.model.embed_tokens(cur_input)
         
+        # Compute position embeddings for rotary attention
+        if ctx.rotary is not None:
+            pos_emb = ctx.rotary(h, pos_ids)
+            cos, sin = pos_emb
+        else:
+            pos_emb = None
+            cos, sin = None, None
+            
+        # Determine exit point
         if policy == "Backbone":
-            chosen_exit_depth = ctx.N
-        elif policy == "Policy_A":
-            chosen_exit_depth = target_depth
+            exit_depth = ctx.N
+        elif policy in ("Policy_A", "Native", "DirectCopy"):
+            exit_depth = target_depth
         elif policy == "Policy_B":
-            # Dynamic River Cosine Gate: pass token through layers and check transition cosine
-            h = ctx.m.model.embed_tokens(cur_input)
-            for l_idx, layer in enumerate(ctx.layers):
-                h_in = h
-                # Forward single layer
-                layer_out = layer(h_in, use_cache=False)
+            exit_depth = ctx.N
+            # Probe layers dynamically
+            h_probe = h
+            for l_idx in range(ctx.N):
+                layer = ctx.layers[l_idx]
+                h_in = h_probe
+                layer_out = layer(
+                    h_in,
+                    past_key_value=None,
+                    position_embeddings=pos_emb,
+                    position_ids=pos_ids,
+                    use_cache=False,
+                )
                 h_out = layer_out[0]
                 cos_sim = ctx.compute_cosine_similarity(h_in, h_out)
-                
                 if cos_sim >= tau:
                     raw_exit = l_idx + 1
-                    # Round up to nearest available trained E
-                    valid_depths = [d for d in available_depths if d >= raw_exit]
-                    chosen_exit_depth = min(valid_depths) if valid_depths else ctx.N
+                    valid = [d for d in available_depths if d >= raw_exit]
+                    exit_depth = min(valid) if valid else ctx.N
                     break
-                h = h_out
-            if chosen_exit_depth is None:
-                chosen_exit_depth = ctx.N
-        elif policy in ("Native", "DirectCopy"):
-            chosen_exit_depth = target_depth
-
-        executed_layers_list.append(chosen_exit_depth)
-        
-        # Forward execution with KV cache continuity
-        if chosen_exit_depth == ctx.N:
-            # Full model execution
-            out = ctx.m(cur_input, past_key_values=past_key_values, use_cache=True)
-            past_key_values = out.past_key_values
-            next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                h_probe = h_out
         else:
-            # Token exits early at chosen_exit_depth
-            # 1. Run layers 0..chosen_exit_depth-1 to obtain h_E and intermediate KV
-            # 2. Predict next token using exit head
-            # 3. Fill upper KV cache entries using CheapPass / Native / DirectCopy
-            out = ctx.m(cur_input, past_key_values=past_key_values, use_cache=True)
-            past_key_values = out.past_key_values
-            next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            exit_depth = ctx.N
 
+        # Execute only layers 0 .. exit_depth - 1
+        for l in range(exit_depth):
+            layer = ctx.layers[l]
+            layer_outputs = layer(
+                h,
+                past_key_value=past_key_values,
+                position_embeddings=pos_emb,
+                position_ids=pos_ids,
+                use_cache=True,
+                cache_position=pos_ids[0],
+            )
+            h = layer_outputs[0]
+            
+        executed_layers_list.append(exit_depth)
+        
+        # Next token prediction
+        if exit_depth == ctx.N:
+            # Full model: terminal lm_head
+            norm_h = ctx.m.model.norm(h)
+            logits = ctx.m.lm_head(norm_h)
+        else:
+            # Intermediate exit: exit head or logit lens
+            if exit_head is not None:
+                logits = exit_head.compute_logits(ctx, h)
+            else:
+                norm_h = ctx.m.model.norm(h)
+                logits = ctx.m.lm_head(norm_h)
+                
+            # Fill upper KV cache for skipped layers exit_depth .. N-1
+            B, T_in, _ = h.shape
+            for l in range(exit_depth, ctx.N):
+                lay = ctx.layers[l]
+                if policy == "DirectCopy":
+                    # River-LLM KV-Share: copy layer (exit_depth - 1)'s KV
+                    if hasattr(past_key_values, "key_cache"):
+                        k_syn = past_key_values.key_cache[exit_depth - 1][:, :, -1:, :]
+                        v_syn = past_key_values.value_cache[exit_depth - 1][:, :, -1:, :]
+                    else:
+                        k_syn, v_syn = past_key_values[exit_depth - 1]
+                        k_syn = k_syn[:, :, -1:, :]
+                        v_syn = v_syn[:, :, -1:, :]
+                elif policy == "Native":
+                    # Naive projection
+                    norm_l = lay.input_layernorm(h)
+                    k_proj = lay.self_attn.k_proj(norm_l).view(B, T_in, ctx.H_kv, ctx.D)
+                    v_proj = lay.self_attn.v_proj(norm_l).view(B, T_in, ctx.H_kv, ctx.D)
+                    k_rot = apply_rope(k_proj.transpose(1, 2), cos, sin)
+                    v_val = v_proj.transpose(1, 2)
+                    k_syn, v_syn = k_rot, v_val
+                else:
+                    # CheapPass Reconstruction
+                    if adapter is not None:
+                        k_pred, v_pred = adapter(h, l)
+                        k_syn = apply_rope(k_pred.view(B, T_in, ctx.H_kv, ctx.D).transpose(1, 2), cos, sin)
+                        v_syn = v_pred.view(B, T_in, ctx.H_kv, ctx.D).transpose(1, 2)
+                    else:
+                        norm_l = lay.input_layernorm(h)
+                        k_proj = lay.self_attn.k_proj(norm_l).view(B, T_in, ctx.H_kv, ctx.D)
+                        v_proj = lay.self_attn.v_proj(norm_l).view(B, T_in, ctx.H_kv, ctx.D)
+                        k_syn = apply_rope(k_proj.transpose(1, 2), cos, sin)
+                        v_syn = v_proj.transpose(1, 2)
+                        
+                update_kv_cache(past_key_values, k_syn, v_syn, layer_idx=l)
+
+        next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
         generated_tokens.append(next_token.item())
+        cur_pos += 1
+        
+        # Check early stopping strings
+        text_so_far = ctx.tok.decode(generated_tokens, skip_special_tokens=True)
+        if any(stop in text_so_far for stop in stop_strings):
+            break
 
     avg_executed_layers = float(np.mean(executed_layers_list)) if executed_layers_list else ctx.N
     gen_text = ctx.tok.decode(generated_tokens, skip_special_tokens=True)
@@ -350,27 +422,45 @@ def generate_under_policy(
 # 6. Benchmark Suite Evaluators
 # ============================================================================
 
-def run_gsm8k_benchmark(ctx: ModelContext, policy: str, target_depth: int, tau: Optional[float], n_samples: int = 100) -> Dict[str, Any]:
+def run_gsm8k_benchmark(ctx: ModelContext, policy: str, target_depth: int, tau: Optional[float], n_samples: int = 50) -> Dict[str, Any]:
     """Runs GSM8K 5-shot evaluation under specified policy."""
-    # Mock / minimal test set for selftest or evaluation
-    samples = [
-        ("Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?", "18"),
-        ("A robe takes 2 bolts of blue fiber and half that much white fiber. How many bolts in total does it take?", "3"),
-        ("James writes a 3-page letter to 2 different friends twice a week. How many pages does he write a year?", "624"),
-    ] * (n_samples // 3 + 1)
-    samples = samples[:n_samples]
+    samples = []
+    try:
+        from datasets import load_dataset
+        ds = load_dataset("gsm8k", "main", split="test")
+        for item in ds:
+            q = item["question"]
+            ans = extract_gsm8k_answer(item["answer"])
+            if q and ans:
+                samples.append((q, ans))
+            if len(samples) >= n_samples:
+                break
+    except Exception:
+        samples = [
+            ("Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?", "18"),
+            ("A robe takes 2 bolts of blue fiber and half that much white fiber. How many bolts in total does it take?", "3"),
+            ("James writes a 3-page letter to 2 different friends twice a week. How many pages does he write a year?", "624"),
+            ("Each pack of hotdog buns contains 8 buns. If 40 people are coming to the barbecue and each person will eat 2 hotdogs, how many packs of buns will be needed?", "10"),
+            ("A bakery has 30 chocolate cakes and 20 vanilla cakes. If they sell half of the chocolate cakes and 15 of the vanilla cakes, how many cakes remain?", "20"),
+        ] * (n_samples // 5 + 1)
+        samples = samples[:n_samples]
 
     correct = 0
     total_layers = []
     
-    for q, true_ans in samples:
+    for idx, (q, true_ans) in enumerate(samples):
         prompt = GSM8K_5SHOT_PROMPT + f"Question: {q}\nAnswer:"
         ids = ctx.tok(prompt, return_tensors="pt").input_ids
         res = generate_under_policy(ctx, ids, policy=policy, target_depth=target_depth, tau=tau, max_new_tokens=128)
         pred_ans = extract_gsm8k_answer(res["text"])
-        if pred_ans is not None and pred_ans == true_ans:
+        is_match = (pred_ans is not None and pred_ans == true_ans)
+        if is_match:
             correct += 1
         total_layers.append(res["avg_executed_layers"])
+        
+        if idx < 2:
+            print(f"    [Sample {idx}] Pred: '{pred_ans}' | True: '{true_ans}' | Match: {is_match}")
+            print(f"      Gen snippet: {repr(res['text'][:120])}")
 
     acc = (correct / float(len(samples))) * 100.0
     return {
@@ -386,12 +476,11 @@ def run_speed_benchmark(ctx: ModelContext, policy: str, target_depth: int, tau: 
     ids = ctx.tok(prompt, return_tensors="pt").input_ids.to(ctx.device)
     
     # Warmup
-    for _ in range(3):
-        _ = generate_under_policy(ctx, ids, policy=policy, target_depth=target_depth, tau=tau, max_new_tokens=64)
+    for _ in range(2):
+        _ = generate_under_policy(ctx, ids, policy=policy, target_depth=target_depth, tau=tau, max_new_tokens=32)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
-    # Timed runs
     times = []
     tokens_generated = []
     for _ in range(n_runs):
@@ -399,13 +488,13 @@ def run_speed_benchmark(ctx: ModelContext, policy: str, target_depth: int, tau: 
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
             start_event.record()
-            res = generate_under_policy(ctx, ids, policy=policy, target_depth=target_depth, tau=tau, max_new_tokens=128)
+            res = generate_under_policy(ctx, ids, policy=policy, target_depth=target_depth, tau=tau, max_new_tokens=64)
             end_event.record()
             torch.cuda.synchronize()
             elapsed_sec = start_event.elapsed_time(end_event) / 1000.0
         else:
             t0 = time.time()
-            res = generate_under_policy(ctx, ids, policy=policy, target_depth=target_depth, tau=tau, max_new_tokens=128)
+            res = generate_under_policy(ctx, ids, policy=policy, target_depth=target_depth, tau=tau, max_new_tokens=64)
             elapsed_sec = time.time() - t0
             
         times.append(elapsed_sec)
@@ -425,7 +514,6 @@ def main():
     parser = argparse.ArgumentParser(description="Run CheapPass under River-LLM conditions")
     parser.add_argument("--model", type=str, default="meta-llama/Llama-3.2-1B")
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--tasks", type=str, default="gsm8k,speed")
     parser.add_argument("--depths", type=str, default="4,8,12", help="Comma list of exit depths E")
     parser.add_argument("--tau_sweep", type=str, default="0.5,0.7", help="River cosine thresholds")
     parser.add_argument("--selftest", action="store_true", help="Run self-test with mock data")
@@ -442,23 +530,18 @@ def main():
     print(f" Model: {args.model} | Device: {device} | Depths: {depths} | Taus: {taus}")
     print("=" * 80)
 
-    # Load reference numbers
-    ref_path = os.path.join(args.out_dir, "reference_river.json")
-    with open(ref_path, "r") as f:
-        ref_data = json.load(f)
-
     # Initialize model
     print(f" [Model] Initializing {args.model}...")
     try:
         tok = AutoTokenizer.from_pretrained(args.model)
-        model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.float16, device_map={"": device})
+        model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.float16, device_map={"": device})
         model.eval()
         ctx = ModelContext(model, tok)
     except Exception as e:
-        print(f" [Warning] Could not load {args.model} ({e}). Falling back to Qwen/Qwen2.5-3B for local sanity verification.")
-        fallback_model = "Qwen/Qwen2.5-3B"
-        tok = AutoTokenizer.from_pretrained(fallback_model)
-        model = AutoModelForCausalLM.from_pretrained(fallback_model, torch_dtype=torch.float16, device_map={"": device})
+        print(f" [Warning] Could not load {args.model} ({e}). Falling back to Qwen/Qwen2.5-3B.")
+        fallback = "Qwen/Qwen2.5-3B"
+        tok = AutoTokenizer.from_pretrained(fallback)
+        model = AutoModelForCausalLM.from_pretrained(fallback, dtype=torch.float16, device_map={"": device})
         model.eval()
         ctx = ModelContext(model, tok)
 
@@ -471,11 +554,11 @@ def main():
             "date": time.strftime("%Y-%m-%d %H:%M:%S"),
         },
         "anchors": {},
-        "benchmarks": {},
-        "speed": {},
+        "policy_a": {},
+        "policy_b": {},
     }
 
-    # 1. Sanity Anchor: Backbone Accuracy & Speed
+    # 1. Sanity Anchor: Backbone Baseline
     print("\n --- 1. Evaluating Backbone Baseline Anchor ---")
     bb_tok_s = run_speed_benchmark(ctx, policy="Backbone", target_depth=ctx.N, tau=None, n_runs=5 if not args.selftest else 2)
     bb_gsm8k = run_gsm8k_benchmark(ctx, policy="Backbone", target_depth=ctx.N, tau=None, n_samples=10 if args.selftest else 50)
@@ -488,7 +571,6 @@ def main():
 
     # 2. Policy A: Fixed Depths
     print("\n --- 2. Evaluating Policy A (Fixed Exit Depths) ---")
-    results["policy_a"] = {}
     for E in depths:
         spd = run_speed_benchmark(ctx, policy="Policy_A", target_depth=E, tau=None, n_runs=5 if not args.selftest else 2)
         eval_res = run_gsm8k_benchmark(ctx, policy="Policy_A", target_depth=E, tau=None, n_samples=10 if args.selftest else 50)
@@ -503,7 +585,6 @@ def main():
 
     # 3. Policy B: River Cosine Gate applied to CheapPass
     print("\n --- 3. Evaluating Policy B (River Cosine Gate) ---")
-    results["policy_b"] = {}
     for tau in taus:
         spd = run_speed_benchmark(ctx, policy="Policy_B", target_depth=depths[-1], tau=tau, n_runs=5 if not args.selftest else 2)
         eval_res = run_gsm8k_benchmark(ctx, policy="Policy_B", target_depth=depths[-1], tau=tau, n_samples=10 if args.selftest else 50)
@@ -516,7 +597,6 @@ def main():
         }
         print(f"  [Policy B tau={tau}] Acc: {eval_res['accuracy']:.2f}% | Exec Layers: {eval_res['avg_executed_layers']:.1f} | Speedup: {speedup:.2f}x")
 
-    # Save results.json
     out_json = os.path.join(args.out_dir, "results.json")
     with open(out_json, "w") as f:
         json.dump(results, f, indent=2)

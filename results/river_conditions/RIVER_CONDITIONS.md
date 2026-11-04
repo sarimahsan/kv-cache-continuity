@@ -102,3 +102,4 @@ This benchmark evaluates **CheapPass** under River-LLM's exact experimental prot
 ### Non-Permissible:
 * Do not claim CheapPass "beats" River-LLM unless accuracy retention is strictly equal or higher at matched or lower executed layer cost, with sanity anchors verified.
 * If CheapPass is weaker at shallow depths ($E=4$), report that transparently and identify $E \ge 8$ ($\tau=0.7$ regime) as the operational boundary.
+
