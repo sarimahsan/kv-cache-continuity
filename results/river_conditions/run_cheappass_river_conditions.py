@@ -102,7 +102,6 @@ def extract_gsm8k_answer(text: str) -> Optional[str]:
     """Extracts numerical answer following '####' or trailing numbers."""
     if not text:
         return None
-    # Truncate at trailing question if model continued generating
     for stop_str in ["\nQuestion:", "\n\nQuestion:", "Question:"]:
         if stop_str in text:
             text = text.split(stop_str)[0]
@@ -116,7 +115,6 @@ def extract_gsm8k_answer(text: str) -> Optional[str]:
         return match[-1].replace(",", "").strip()
     match = re.findall(r"(-?[0-9\.,]+)", text)
     if match:
-        # Strip trailing dot if present
         ans = match[-1].replace(",", "").strip()
         if ans.endswith("."):
             ans = ans[:-1]
@@ -150,10 +148,10 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rope(k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    # k: [B, H_kv, 1, D]
-    # cos, sin: [B, 1, D] or [1, 1, D]
-    return (k * cos.unsqueeze(1)) + (rotate_half(k) * sin.unsqueeze(1))
+def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    # x: [1, H, 1, D]
+    # cos, sin: [1, 1, D]
+    return (x * cos.unsqueeze(1)) + (rotate_half(x) * sin.unsqueeze(1))
 
 
 class ModelContext:
@@ -168,6 +166,7 @@ class ModelContext:
         self.H_q = self.cfg.num_attention_heads
         self.H_kv = getattr(self.cfg, "num_key_value_heads", self.H_q)
         self.D = getattr(self.cfg, "head_dim", self.d // self.H_q)
+        self.rep = self.H_q // self.H_kv
         self.rotary = getattr(model.model, "rotary_emb", None)
         self.device = next(model.parameters()).device
         self.dtype = next(model.parameters()).dtype
@@ -230,21 +229,60 @@ class ExitHead(nn.Module):
 
 
 # ============================================================================
-# 5. Core Generation & Policy Runner with True Layer Skipping
+# 5. Core Generation & Policy Runner with Direct Layer Math
 # ============================================================================
 
-def update_kv_cache(past_key_values, k_state: torch.Tensor, v_state: torch.Tensor, layer_idx: int):
-    """Inserts or appends key and value states into past_key_values across cache implementations."""
-    if hasattr(past_key_values, "update"):
-        past_key_values.update(k_state, v_state, layer_idx=layer_idx)
-    elif isinstance(past_key_values, (list, tuple)):
-        # Legacy tuple structure
-        if layer_idx < len(past_key_values):
-            k_old, v_old = past_key_values[layer_idx]
-            past_key_values[layer_idx] = (
-                torch.cat([k_old, k_state], dim=2),
-                torch.cat([v_old, v_state], dim=2),
-            )
+def forward_single_token_layer(
+    lay,
+    h: torch.Tensor,
+    past_k: Optional[torch.Tensor],
+    past_v: Optional[torch.Tensor],
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    H_q: int,
+    H_kv: int,
+    D: int,
+    rep: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Executes a single decoder layer for one token via standard projection and attention math.
+    Bypasses private HuggingFace layer kwargs to prevent version and argument signature mismatches.
+    """
+    # h: [1, 1, d]
+    n = lay.input_layernorm(h)
+    q = lay.self_attn.q_proj(n).view(1, 1, H_q, D).transpose(1, 2)    # [1, H_q, 1, D]
+    k = lay.self_attn.k_proj(n).view(1, 1, H_kv, D).transpose(1, 2)   # [1, H_kv, 1, D]
+    v = lay.self_attn.v_proj(n).view(1, 1, H_kv, D).transpose(1, 2)   # [1, H_kv, 1, D]
+
+    # Apply RoPE
+    q = apply_rope(q, cos, sin)
+    k = apply_rope(k, cos, sin)
+
+    # Append to past KV cache
+    if past_k is not None:
+        k_full = torch.cat([past_k, k], dim=2)
+        v_full = torch.cat([past_v, v], dim=2)
+    else:
+        k_full = k
+        v_full = v
+
+    # Repeat KV for Grouped-Query Attention (GQA)
+    if rep > 1:
+        k_attn = k_full.repeat_interleave(rep, dim=1)
+        v_attn = v_full.repeat_interleave(rep, dim=1)
+    else:
+        k_attn = k_full
+        v_attn = v_full
+
+    scale = D ** -0.5
+    scores = torch.matmul(q, k_attn.transpose(-1, -2)) * scale  # [1, H_q, 1, T]
+    attn_weights = F.softmax(scores, dim=-1)
+    attn_out = torch.matmul(attn_weights.to(v_attn.dtype), v_attn)  # [1, H_q, 1, D]
+    attn_out = attn_out.transpose(1, 2).reshape(1, 1, H_q * D)
+
+    h_out = h + lay.self_attn.o_proj(attn_out)
+    h_out = h_out + lay.mlp(lay.post_attention_layernorm(h_out))
+    return h_out, k_full, v_full
 
 
 @torch.no_grad()
@@ -279,6 +317,17 @@ def generate_under_policy(
     # 1. Full Pre-fill Pass
     outputs = ctx.m(curr_ids, use_cache=True)
     past_key_values = outputs.past_key_values
+    
+    # Unpack past key values into list of (k, v) tensors
+    kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
+    for l in range(ctx.N):
+        if hasattr(past_key_values, "key_cache"):
+            k = past_key_values.key_cache[l]
+            v = past_key_values.value_cache[l]
+        else:
+            k, v = past_key_values[l]
+        kv_cache.append((k, v))
+
     next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
     generated_tokens.append(next_token.item())
     executed_layers_list.append(ctx.N)
@@ -294,16 +343,19 @@ def generate_under_policy(
         cur_input = next_token  # [1, 1]
         pos_ids = torch.tensor([[cur_pos]], device=device, dtype=torch.long)
         
-        # Embed single token
+        # Initial token embedding
         h = ctx.m.model.embed_tokens(cur_input)
         
-        # Compute position embeddings for rotary attention
+        # Compute Rotary cos/sin frequencies
         if ctx.rotary is not None:
             pos_emb = ctx.rotary(h, pos_ids)
             cos, sin = pos_emb
+            if cos.dim() == 2:
+                cos = cos.unsqueeze(0)
+                sin = sin.unsqueeze(0)
         else:
-            pos_emb = None
-            cos, sin = None, None
+            cos = torch.ones((1, 1, ctx.D), device=device, dtype=ctx.dtype)
+            sin = torch.zeros((1, 1, ctx.D), device=device, dtype=ctx.dtype)
             
         # Determine exit point
         if policy == "Backbone":
@@ -312,19 +364,22 @@ def generate_under_policy(
             exit_depth = target_depth
         elif policy == "Policy_B":
             exit_depth = ctx.N
-            # Probe layers dynamically
             h_probe = h
             for l_idx in range(ctx.N):
-                layer = ctx.layers[l_idx]
                 h_in = h_probe
-                layer_out = layer(
+                # Compute layer output on probe token
+                h_out, _, _ = forward_single_token_layer(
+                    ctx.layers[l_idx],
                     h_in,
-                    past_key_value=None,
-                    position_embeddings=pos_emb,
-                    position_ids=pos_ids,
-                    use_cache=False,
+                    None,
+                    None,
+                    cos,
+                    sin,
+                    ctx.H_q,
+                    ctx.H_kv,
+                    ctx.D,
+                    ctx.rep,
                 )
-                h_out = layer_out[0]
                 cos_sim = ctx.compute_cosine_similarity(h_in, h_out)
                 if cos_sim >= tau:
                     raw_exit = l_idx + 1
@@ -336,68 +391,74 @@ def generate_under_policy(
             exit_depth = ctx.N
 
         # Execute only layers 0 .. exit_depth - 1
+        last_k, last_v = None, None
         for l in range(exit_depth):
-            layer = ctx.layers[l]
-            layer_outputs = layer(
+            lay = ctx.layers[l]
+            past_k, past_v = kv_cache[l]
+            h, k_new_full, v_new_full = forward_single_token_layer(
+                lay,
                 h,
-                past_key_value=past_key_values,
-                position_embeddings=pos_emb,
-                position_ids=pos_ids,
-                use_cache=True,
-                cache_position=pos_ids[0],
+                past_k,
+                past_v,
+                cos,
+                sin,
+                ctx.H_q,
+                ctx.H_kv,
+                ctx.D,
+                ctx.rep,
             )
-            h = layer_outputs[0]
+            kv_cache[l] = (k_new_full, v_new_full)
+            last_k = k_new_full[:, :, -1:, :]
+            last_v = v_new_full[:, :, -1:, :]
             
         executed_layers_list.append(exit_depth)
         
         # Next token prediction
         if exit_depth == ctx.N:
-            # Full model: terminal lm_head
             norm_h = ctx.m.model.norm(h)
             logits = ctx.m.lm_head(norm_h)
         else:
-            # Intermediate exit: exit head or logit lens
             if exit_head is not None:
                 logits = exit_head.compute_logits(ctx, h)
             else:
                 norm_h = ctx.m.model.norm(h)
                 logits = ctx.m.lm_head(norm_h)
                 
-            # Fill upper KV cache for skipped layers exit_depth .. N-1
+            # Fill upper KV cache entries for skipped layers exit_depth .. N-1
             B, T_in, _ = h.shape
             for l in range(exit_depth, ctx.N):
                 lay = ctx.layers[l]
+                past_k, past_v = kv_cache[l]
+                
                 if policy == "DirectCopy":
-                    # River-LLM KV-Share: copy layer (exit_depth - 1)'s KV
-                    if hasattr(past_key_values, "key_cache"):
-                        k_syn = past_key_values.key_cache[exit_depth - 1][:, :, -1:, :]
-                        v_syn = past_key_values.value_cache[exit_depth - 1][:, :, -1:, :]
-                    else:
-                        k_syn, v_syn = past_key_values[exit_depth - 1]
-                        k_syn = k_syn[:, :, -1:, :]
-                        v_syn = v_syn[:, :, -1:, :]
+                    # River-LLM KV-Share: copy layer (exit_depth - 1)'s newest KV
+                    k_synth = last_k
+                    v_synth = last_v
                 elif policy == "Native":
                     # Naive projection
                     norm_l = lay.input_layernorm(h)
-                    k_proj = lay.self_attn.k_proj(norm_l).view(B, T_in, ctx.H_kv, ctx.D)
-                    v_proj = lay.self_attn.v_proj(norm_l).view(B, T_in, ctx.H_kv, ctx.D)
-                    k_rot = apply_rope(k_proj.transpose(1, 2), cos, sin)
-                    v_val = v_proj.transpose(1, 2)
-                    k_syn, v_syn = k_rot, v_val
+                    k_proj = lay.self_attn.k_proj(norm_l).view(1, 1, ctx.H_kv, ctx.D).transpose(1, 2)
+                    v_proj = lay.self_attn.v_proj(norm_l).view(1, 1, ctx.H_kv, ctx.D).transpose(1, 2)
+                    k_synth = apply_rope(k_proj, cos, sin)
+                    v_synth = v_proj
                 else:
                     # CheapPass Reconstruction
                     if adapter is not None:
                         k_pred, v_pred = adapter(h, l)
-                        k_syn = apply_rope(k_pred.view(B, T_in, ctx.H_kv, ctx.D).transpose(1, 2), cos, sin)
-                        v_syn = v_pred.view(B, T_in, ctx.H_kv, ctx.D).transpose(1, 2)
+                        k_proj = k_pred.view(1, 1, ctx.H_kv, ctx.D).transpose(1, 2)
+                        v_proj = v_pred.view(1, 1, ctx.H_kv, ctx.D).transpose(1, 2)
+                        k_synth = apply_rope(k_proj, cos, sin)
+                        v_synth = v_proj
                     else:
                         norm_l = lay.input_layernorm(h)
-                        k_proj = lay.self_attn.k_proj(norm_l).view(B, T_in, ctx.H_kv, ctx.D)
-                        v_proj = lay.self_attn.v_proj(norm_l).view(B, T_in, ctx.H_kv, ctx.D)
-                        k_syn = apply_rope(k_proj.transpose(1, 2), cos, sin)
-                        v_syn = v_proj.transpose(1, 2)
-                        
-                update_kv_cache(past_key_values, k_syn, v_syn, layer_idx=l)
+                        k_proj = lay.self_attn.k_proj(norm_l).view(1, 1, ctx.H_kv, ctx.D).transpose(1, 2)
+                        v_proj = lay.self_attn.v_proj(norm_l).view(1, 1, ctx.H_kv, ctx.D).transpose(1, 2)
+                        k_synth = apply_rope(k_proj, cos, sin)
+                        v_synth = v_proj
+
+                k_cat = torch.cat([past_k, k_synth], dim=2)
+                v_cat = torch.cat([past_v, v_synth], dim=2)
+                kv_cache[l] = (k_cat, v_cat)
 
         next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
         generated_tokens.append(next_token.item())
