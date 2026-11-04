@@ -1,0 +1,230 @@
+{
+  "meta": {
+    "paper_title": "River-LLM: Large Language Model Seamless Exit Based on KV Share",
+    "authors": "Yingtao Shen and An Zou",
+    "venue": "ACL 2026",
+    "arxiv_id": "2604.18396",
+    "arxiv_url": "https://arxiv.org/abs/2604.18396",
+    "citation_notice": "Reported by the authors, not reproduced. Hardware used in paper: single NVIDIA A40.",
+    "known_inconsistencies": [
+      "Llama-3.2-1B GSM8K backbone accuracy is reported as 33.5% in Table 2, but 33.2% in Table 3.",
+      "Llama-3.2-1B ARC-e average exit positions are reported as 3.24 (tau=0.5) and 10.68 (tau=0.7), which are identical to ARC-c (likely typographical copy error in Table 2 of the paper).",
+      "The paper abstract claims 1.53x to 2.16x speedup, while the conclusion claims 1.71x to 2.16x speedup.",
+      "Greedy decoding and maximum sequence generation length are not explicitly specified in the paper."
+    ]
+  },
+  "table2_accuracy_and_executed_layers": {
+    "Llama-3.2-1B": {
+      "total_layers": 16,
+      "benchmarks": {
+        "BoolQ": {
+          "backbone_acc": 69.4,
+          "tau_0_5_acc": 67.5,
+          "tau_0_7_acc": 69.2,
+          "avg_exit_layer_tau_0_5": 3.90,
+          "avg_exit_layer_tau_0_7": 15.02,
+          "task_type": "0-shot loglikelihood"
+        },
+        "HellaSwag": {
+          "backbone_acc": 45.1,
+          "tau_0_5_acc": 44.3,
+          "tau_0_7_acc": 44.9,
+          "avg_exit_layer_tau_0_5": 3.71,
+          "avg_exit_layer_tau_0_7": 10.94,
+          "task_type": "0-shot loglikelihood"
+        },
+        "ARC-c": {
+          "backbone_acc": 35.7,
+          "tau_0_5_acc": 35.2,
+          "tau_0_7_acc": 35.9,
+          "avg_exit_layer_tau_0_5": 3.24,
+          "avg_exit_layer_tau_0_7": 10.68,
+          "task_type": "0-shot loglikelihood"
+        },
+        "ARC-e": {
+          "backbone_acc": 68.4,
+          "tau_0_5_acc": 67.8,
+          "tau_0_7_acc": 67.1,
+          "avg_exit_layer_tau_0_5": 3.24,
+          "avg_exit_layer_tau_0_7": 10.68,
+          "task_type": "0-shot loglikelihood",
+          "note": "Exit positions reported identical to ARC-c in original paper"
+        },
+        "MMLU": {
+          "backbone_acc": 46.1,
+          "tau_0_5_acc": 44.3,
+          "tau_0_7_acc": 46.0,
+          "avg_exit_layer_tau_0_5": 4.05,
+          "avg_exit_layer_tau_0_7": 12.70,
+          "task_type": "0-shot loglikelihood"
+        },
+        "GSM8K": {
+          "backbone_acc": 33.5,
+          "tau_0_5_acc": 29.3,
+          "tau_0_7_acc": 33.5,
+          "avg_exit_layer_tau_0_5": 3.79,
+          "avg_exit_layer_tau_0_7": 15.05,
+          "task_type": "5-shot generation"
+        },
+        "MATH": {
+          "backbone_acc": 17.8,
+          "tau_0_5_acc": 14.6,
+          "tau_0_7_acc": 17.0,
+          "avg_exit_layer_tau_0_5": 3.56,
+          "avg_exit_layer_tau_0_7": 14.67,
+          "task_type": "4-shot generation"
+        },
+        "HumanEval": {
+          "backbone_acc": 25.8,
+          "tau_0_5_acc": 23.2,
+          "tau_0_7_acc": 25.7,
+          "avg_exit_layer_tau_0_5": 2.30,
+          "avg_exit_layer_tau_0_7": 10.05,
+          "task_type": "0-shot generation"
+        }
+      }
+    },
+    "Llama-3.1-8B": {
+      "total_layers": 32,
+      "benchmarks": {
+        "BoolQ": {
+          "backbone_acc": 84.1,
+          "tau_0_5_acc": 83.4,
+          "tau_0_7_acc": 83.4,
+          "avg_exit_layer_tau_0_5": 3.07,
+          "avg_exit_layer_tau_0_7": 9.74,
+          "task_type": "0-shot loglikelihood"
+        },
+        "HellaSwag": {
+          "backbone_acc": 59.1,
+          "tau_0_5_acc": 58.5,
+          "tau_0_7_acc": 58.6,
+          "avg_exit_layer_tau_0_5": 3.09,
+          "avg_exit_layer_tau_0_7": 8.80,
+          "task_type": "0-shot loglikelihood"
+        },
+        "ARC-c": {
+          "backbone_acc": 51.5,
+          "tau_0_5_acc": 50.3,
+          "tau_0_7_acc": 51.2,
+          "avg_exit_layer_tau_0_5": 3.01,
+          "avg_exit_layer_tau_0_7": 8.44,
+          "task_type": "0-shot loglikelihood"
+        },
+        "ARC-e": {
+          "backbone_acc": 81.7,
+          "tau_0_5_acc": 82.0,
+          "tau_0_7_acc": 81.4,
+          "avg_exit_layer_tau_0_5": 3.01,
+          "avg_exit_layer_tau_0_7": 8.44,
+          "task_type": "0-shot loglikelihood",
+          "note": "Exit positions reported identical to ARC-c in original paper"
+        },
+        "MMLU": {
+          "backbone_acc": 68.0,
+          "tau_0_5_acc": 66.1,
+          "tau_0_7_acc": 67.4,
+          "avg_exit_layer_tau_0_5": 3.04,
+          "avg_exit_layer_tau_0_7": 14.01,
+          "task_type": "0-shot loglikelihood"
+        },
+        "GSM8K": {
+          "backbone_acc": 78.2,
+          "tau_0_5_acc": 74.4,
+          "tau_0_7_acc": 75.6,
+          "avg_exit_layer_tau_0_5": 2.96,
+          "avg_exit_layer_tau_0_7": 26.98,
+          "task_type": "5-shot generation"
+        },
+        "MATH": {
+          "backbone_acc": 27.0,
+          "tau_0_5_acc": 26.6,
+          "tau_0_7_acc": 25.7,
+          "avg_exit_layer_tau_0_5": 2.81,
+          "avg_exit_layer_tau_0_7": 13.10,
+          "task_type": "4-shot generation"
+        },
+        "HumanEval": {
+          "backbone_acc": 57.3,
+          "tau_0_5_acc": 55.5,
+          "tau_0_7_acc": 57.3,
+          "avg_exit_layer_tau_0_5": 2.16,
+          "avg_exit_layer_tau_0_7": 5.84,
+          "task_type": "0-shot generation"
+        }
+      }
+    }
+  },
+  "table3_speed_tau_0_5_a40_bs1": {
+    "hardware": "Single NVIDIA A40 (48GB)",
+    "batch_size": 1,
+    "tau": 0.5,
+    "runs_averaged": 10,
+    "tasks": {
+      "Llama-3.2-1B": {
+        "GSM8K": {
+          "backbone_acc": 33.2,
+          "full_quant_acc": 25.1,
+          "river_acc": 29.3,
+          "backbone_tok_per_s": 84.5,
+          "full_quant_tok_per_s": 195.5,
+          "river_tok_per_s": 182.9,
+          "full_quant_speedup": 2.31,
+          "river_speedup": 2.16
+        },
+        "MATH": {
+          "backbone_acc": 17.8,
+          "full_quant_acc": 12.2,
+          "river_acc": 14.6,
+          "backbone_tok_per_s": 100.5,
+          "full_quant_tok_per_s": 208.8,
+          "river_tok_per_s": 189.2,
+          "full_quant_speedup": 2.08,
+          "river_speedup": 1.88
+        },
+        "HumanEval": {
+          "backbone_acc": 25.8,
+          "full_quant_acc": 20.4,
+          "river_acc": 23.2,
+          "backbone_tok_per_s": 100.4,
+          "full_quant_tok_per_s": 190.6,
+          "river_tok_per_s": 171.8,
+          "full_quant_speedup": 1.90,
+          "river_speedup": 1.71
+        }
+      },
+      "Llama-3.1-8B": {
+        "GSM8K": {
+          "backbone_acc": 78.2,
+          "full_quant_acc": 69.8,
+          "river_acc": 74.4,
+          "backbone_tok_per_s": 25.3,
+          "full_quant_tok_per_s": 47.5,
+          "river_tok_per_s": 45.0,
+          "full_quant_speedup": 1.88,
+          "river_speedup": 1.78
+        },
+        "MATH": {
+          "backbone_acc": 27.0,
+          "full_quant_acc": 23.1,
+          "river_acc": 26.6,
+          "backbone_tok_per_s": 25.1,
+          "full_quant_tok_per_s": 47.6,
+          "river_tok_per_s": 43.1,
+          "full_quant_speedup": 1.89,
+          "river_speedup": 1.72
+        },
+        "HumanEval": {
+          "backbone_acc": 57.3,
+          "full_quant_acc": 50.2,
+          "river_acc": 55.5,
+          "backbone_tok_per_s": 25.2,
+          "full_quant_tok_per_s": 47.7,
+          "river_tok_per_s": 44.7,
+          "full_quant_speedup": 1.89,
+          "river_speedup": 1.77
+        }
+      }
+    }
+  }
+}
