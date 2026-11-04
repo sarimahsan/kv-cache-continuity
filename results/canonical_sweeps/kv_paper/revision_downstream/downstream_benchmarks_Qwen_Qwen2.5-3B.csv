@@ -1,0 +1,8 @@
+model_id,condition,depth,rel_depth,hellaswag_acc,arc_easy_acc,lambada_acc,overall_acc,delta_vs_oracle
+Qwen/Qwen2.5-3B,Oracle Baseline,36,100.0%,100.0,33.33333333333333,100.0,75.0,0.0
+Qwen/Qwen2.5-3B,Native Projection,22,61.1%,66.66666666666666,33.33333333333333,100.0,62.5,-12.5
+Qwen/Qwen2.5-3B,Direct Copy,22,61.1%,66.66666666666666,33.33333333333333,100.0,62.5,-12.5
+Qwen/Qwen2.5-3B,Native Projection,24,66.7%,100.0,33.33333333333333,100.0,75.0,0.0
+Qwen/Qwen2.5-3B,Direct Copy,24,66.7%,33.33333333333333,33.33333333333333,100.0,50.0,-25.0
+Qwen/Qwen2.5-3B,Native Projection,30,83.3%,100.0,33.33333333333333,100.0,75.0,0.0
+Qwen/Qwen2.5-3B,Direct Copy,30,83.3%,66.66666666666666,33.33333333333333,100.0,62.5,-12.5

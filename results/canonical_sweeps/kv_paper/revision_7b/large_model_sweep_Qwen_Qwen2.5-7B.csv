@@ -1,0 +1,7 @@
+model_id,depth,rel_depth,policy,ppl,kl,top1,tokens
+Qwen/Qwen2.5-7B,14,50.0%,native_projection,73.49,1.4246,51.85,945
+Qwen/Qwen2.5-7B,14,50.0%,direct_copy,1909.91,4.7043,11.43,945
+Qwen/Qwen2.5-7B,20,71.4%,native_projection,46.83,0.9273,58.41,945
+Qwen/Qwen2.5-7B,20,71.4%,direct_copy,275.11,2.7888,25.19,945
+Qwen/Qwen2.5-7B,24,85.7%,native_projection,24.93,0.303,70.58,945
+Qwen/Qwen2.5-7B,24,85.7%,direct_copy,112.94,1.8633,38.2,945

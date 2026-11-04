@@ -1,0 +1,5 @@
+model_id,depth,rel_depth,exit_policy,adapter_used,kl_attn,kl_readout,kl_sum_pred,kl_joint,interaction_delta,top1_joint,ppl_joint,joint_full_token_kl,joint_exit_token_kl,joint_full_token_top1,joint_exit_token_top1
+Qwen/Qwen2.5-3B,18,50.0%,mixed_50,False,0.6539,6.0923,6.7462,6.4135,-0.3327,34.23,11824.32,0.6323,12.3812,66.98,0.43
+Qwen/Qwen2.5-3B,22,61.1%,mixed_50,False,0.5385,5.7194,6.258,5.981,-0.277,37.3,7768.86,0.5149,11.6234,73.12,0.32
+Qwen/Qwen2.5-3B,24,66.7%,mixed_50,False,0.4774,5.6651,6.1425,5.8942,-0.2483,37.51,7315.99,0.4511,11.5129,73.44,0.43
+Qwen/Qwen2.5-3B,30,83.3%,mixed_50,False,0.1527,3.636,3.7887,3.6921,-0.0966,49.74,763.11,0.1105,7.3892,86.35,11.94

@@ -1,0 +1,4 @@
+model_id,depth,kl_proj,top1_proj,kl_oracle_k_proj_v,top1_oracle_k_proj_v,kl_proj_k_oracle_v,top1_proj_k_oracle_v,kl_copy,top1_copy,shapley_val,shapley_key,pct_val_dominance
+meta-llama/Llama-3.2-1B,6,1.1136,49.79,0.7554,60.05,0.4315,65.77,6.3972,6.77,0.7187,0.3949,64.5
+meta-llama/Llama-3.2-1B,8,0.5912,63.81,0.5478,68.1,0.2382,74.6,4.2044,20.79,0.4504,0.1408,76.2
+meta-llama/Llama-3.2-1B,10,0.4193,70.26,0.4057,76.77,0.1368,80.53,2.3323,37.78,0.3441,0.0752,82.1
