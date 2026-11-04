@@ -403,6 +403,7 @@ def resolve_adapter_checkpoint(
         "/content/kv-cache-continuity/cheap_pass_out",
         "/kaggle/working/cheap_pass_checkpoints",
         "/kaggle/working/cheap_pass_out",
+        "/kaggle/input/models/sarimahsan/cheap-pass/pytorch/default/1/cheap_pass_checkpoints",
     ]
     for cd in candidate_dirs:
         if os.path.isfile(cd):
@@ -543,8 +544,14 @@ def main():
 
     # 3. Fit Closed-Form S3 Affine Baseline
     print(f" [Baseline] Fitting closed-form S3_Affine baseline at E={args.depth}...")
-    s3_method = PostProjectionScalingMethod("S3", "S3_affine")
-    fit_all_group_s({"S3": s3_method}, ctx, data.train, args.depth, device, n_fit=64, batch_size=2)
+    s_group = {
+        "S1": PostProjectionScalingMethod("S1", "S1_scalar"),
+        "S2": PostProjectionScalingMethod("S2", "S2_per_head"),
+        "S3": PostProjectionScalingMethod("S3", "S3_affine"),
+        "S4": PostProjectionScalingMethod("S4", "S4_mean_drift"),
+    }
+    fit_all_group_s(s_group, ctx, data.train, args.depth, device, n_fit=64, batch_size=2)
+    s3_method = s_group["S3"]
 
     native_method = Native()
     direct_method = Direct()
