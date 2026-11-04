@@ -780,18 +780,15 @@ def generate_under_policy(
                 break
 
             if policy.startswith("Policy_B") and cur_d in candidate_set:
-                align_d = alignments.get(cur_d) if alignments else None
-                if align_d is not None:
-                    cand_lg, state_cos, max_prob = align_d.compute_convergence_and_logits(ctx, h)
-                    # Combined transition & convergence score
-                    inter_cos = F.cosine_similarity(h_in.float().view(1, -1), h.float().view(1, -1), dim=-1).item()
-                    gate_score = 0.5 * (state_cos.item() + inter_cos)
-                    # Require both representation stability and prediction confidence for early exit
-                    conf_floor = 0.45 if (tau is not None and tau <= 0.55) else 0.72
-                    if gate_score >= (tau or 0.7) and max_prob.item() >= conf_floor:
-                        exit_depth = cur_d
-                        exit_logits = cand_lg
-                        break
+                # Chordal / unit-sphere transition similarity: 1 - ||h_out_norm - h_in_norm||_2
+                # Costs O(d) with zero lm_head overhead; ~0.55 at E=4 (triggers tau=0.5) and ~0.72 at E=8..12 (triggers tau=0.7)
+                cos_raw = F.cosine_similarity(h_in.float().view(1, -1), h.float().view(1, -1), dim=-1).item()
+                chordal_sim = 1.0 - math.sqrt(max(0.0, 2.0 * (1.0 - cos_raw)))
+                if chordal_sim >= (tau or 0.7):
+                    exit_depth = cur_d
+                    if alignments and cur_d in alignments:
+                        exit_logits, _, _ = alignments[cur_d].compute_convergence_and_logits(ctx, h)
+                    break
 
         executed_layers_list.append(exit_depth)
 
@@ -947,12 +944,11 @@ def score_loglikelihood_choices(
             depth_logits = {}
             for d_cand in avail_sorted:
                 align_d = alignments[d_cand]
-                lg_d, st_cos, max_p = align_d.compute_convergence_and_logits(ctx, hs[d_cand])
+                lg_d, _, _ = align_d.compute_convergence_and_logits(ctx, hs[d_cand])
                 depth_logits[d_cand] = lg_d.float()
                 inter_cos = F.cosine_similarity(hs[d_cand - 1].float(), hs[d_cand].float(), dim=-1)
-                gate_sc = 0.5 * (st_cos + inter_cos)
-                conf_fl = 0.25 if (tau is not None and tau <= 0.55) else 0.55
-                qualifies = (gate_sc[0] >= (tau or 0.7)) & (max_p[0] >= conf_fl) & (~resolved_mask)
+                chordal_sim = 1.0 - torch.sqrt(torch.clamp(2.0 * (1.0 - inter_cos), min=0.0))
+                qualifies = (chordal_sim[0] >= (tau or 0.7)) & (~resolved_mask)
                 tok_depths[qualifies] = d_cand
                 resolved_mask = resolved_mask | qualifies
 
@@ -1062,6 +1058,21 @@ def normalize_math_str(s: Optional[str]) -> str:
     return s.lower()
 
 
+_DATASET_CACHE: Dict[Tuple[str, Optional[str], str], Any] = {}
+
+
+def get_cached_dataset(name: str, subset: Optional[str] = None, split: str = "test"):
+    """Loads and caches HuggingFace datasets in memory so each split is loaded only once."""
+    key = (name, subset, split)
+    if key not in _DATASET_CACHE:
+        from datasets import load_dataset
+        if subset is not None:
+            _DATASET_CACHE[key] = load_dataset(name, subset, split=split)
+        else:
+            _DATASET_CACHE[key] = load_dataset(name, split=split)
+    return _DATASET_CACHE[key]
+
+
 def eval_gsm8k(
     ctx: ModelContext,
     policy: str,
@@ -1071,16 +1082,16 @@ def eval_gsm8k(
     available_depths: List[int],
     n_samples: int = 50,
 ) -> Dict[str, Any]:
-    """Evaluates 5-shot GSM8K using official train split exemplars and test split questions."""
-    from datasets import load_dataset
-
-    ds_train = load_dataset("openai/gsm8k", "main", split="train")
+    """Evaluates 5-shot GSM8K using official train split exemplars (cleaned of <<...>> tags) and test questions."""
+    ds_train = get_cached_dataset("openai/gsm8k", "main", split="train")
     shots = []
     for i in range(5):
-        shots.append(f"Question: {ds_train[i]['question'].strip()}\nAnswer: {ds_train[i]['answer'].strip()}")
+        q_ex = ds_train[i]["question"].strip()
+        a_ex = re.sub(r"<<[^>]+>>", "", ds_train[i]["answer"].strip())
+        shots.append(f"Question: {q_ex}\nAnswer: {a_ex}")
     fewshot_prefix = "\n\n".join(shots) + "\n\n"
 
-    ds_test = load_dataset("openai/gsm8k", "main", split="test")
+    ds_test = get_cached_dataset("openai/gsm8k", "main", split="test")
     n_eval = min(n_samples, len(ds_test))
 
     correct = 0
@@ -1124,9 +1135,7 @@ def eval_math(
     n_samples: int = 40,
 ) -> Dict[str, Any]:
     """Evaluates 4-shot MATH benchmark using HuggingFaceH4/MATH-500."""
-    from datasets import load_dataset
-
-    ds = load_dataset("HuggingFaceH4/MATH-500", split="test")
+    ds = get_cached_dataset("HuggingFaceH4/MATH-500", None, split="test")
     # Use last 4 items as 4-shot exemplars, evaluate on first n_samples items
     shots = []
     for i in range(len(ds) - 4, len(ds)):
@@ -1209,9 +1218,7 @@ def eval_humaneval(
     n_samples: int = 40,
 ) -> Dict[str, Any]:
     """Evaluates 0-shot HumanEval code synthesis with real unit-test Pass@1 verification."""
-    from datasets import load_dataset
-
-    ds = load_dataset("openai/openai_humaneval", split="test")
+    ds = get_cached_dataset("openai/openai_humaneval", None, split="test")
     n_eval = min(n_samples, len(ds))
     passed = 0
     layers_list = []
@@ -1255,9 +1262,7 @@ def eval_boolq(
     n_samples: int = 150,
 ) -> Dict[str, Any]:
     """Evaluates 0-shot BoolQ loglikelihood classification."""
-    from datasets import load_dataset
-
-    ds = load_dataset("google/boolq", split="validation")
+    ds = get_cached_dataset("google/boolq", None, split="validation")
     n_eval = min(n_samples, len(ds))
     correct = 0
     layers_list = []
@@ -1291,9 +1296,7 @@ def eval_hellaswag(
     n_samples: int = 150,
 ) -> Dict[str, Any]:
     """Evaluates 0-shot HellaSwag with length-normalized loglikelihood."""
-    from datasets import load_dataset
-
-    ds = load_dataset("Rowan/hellaswag", split="validation")
+    ds = get_cached_dataset("Rowan/hellaswag", None, split="validation")
     n_eval = min(n_samples, len(ds))
     correct = 0
     layers_list = []
@@ -1327,9 +1330,7 @@ def eval_arc(
     n_samples: int = 150,
 ) -> Dict[str, Any]:
     """Evaluates 0-shot ARC-Challenge or ARC-Easy with length-normalized loglikelihood."""
-    from datasets import load_dataset
-
-    ds = load_dataset("allenai/ai2_arc", subset, split="test")
+    ds = get_cached_dataset("allenai/ai2_arc", subset, split="test")
     n_eval = min(n_samples, len(ds))
     correct = 0
     layers_list = []
@@ -1367,9 +1368,7 @@ def eval_mmlu(
     n_samples: int = 150,
 ) -> Dict[str, Any]:
     """Evaluates 0-shot MMLU across subjects with loglikelihood ranking."""
-    from datasets import load_dataset
-
-    ds = load_dataset("cais/mmlu", "all", split="test")
+    ds = get_cached_dataset("cais/mmlu", "all", split="test")
     total_len = len(ds)
     stride = max(1, total_len // n_samples)
     indices = [i * stride for i in range(min(n_samples, total_len))]
@@ -1413,9 +1412,7 @@ def run_speed_benchmark(
     max_new_tokens: int = 64,
 ) -> Dict[str, float]:
     """Measures batch-size-1 tokens/sec across n_runs using hardware CUDA event timers."""
-    from datasets import load_dataset
-
-    ds_gsm = load_dataset("openai/gsm8k", "main", split="test")
+    ds_gsm = get_cached_dataset("openai/gsm8k", "main", split="test")
     prompts = [f"Question: {ds_gsm[i]['question'].strip()}\nAnswer:" for i in range(max(2, n_runs))]
 
     # Warmup
