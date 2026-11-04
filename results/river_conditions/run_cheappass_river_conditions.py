@@ -139,7 +139,7 @@ def extract_math_answer(text: str) -> Optional[str]:
 
 
 # ============================================================================
-# 3. Model Wrapper & Cache Helpers
+# 3. Model Context & Robust Cache Helpers
 # ============================================================================
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -229,50 +229,177 @@ class ModelContext:
 
 
 # ============================================================================
-# 4. CheapPass Linear Adapter & Exit Head
+# 4. Calibration & Closed-Form Linear Alignment (H1 Exit Lens + CheapPass S1)
 # ============================================================================
 
-class CheapPassLinearAdapter(nn.Module):
+class CalibratedAlignment:
     """
-    Low-rank linear cross-layer adapter (L128).
-    Maps h_E directly to missing (K_l, V_l) for l in [E, N-1].
+    Closed-form affine alignment parameters:
+      1. Exit Head: Ridge regression mapping h_E -> h_L in fp64.
+      2. CheapPass S1/S4: Post-projection layerwise scale factors s_k, s_v to neutralize Value norm explosion.
     """
-    def __init__(self, d_in: int, skipped_layers: List[int], H_kv: int, D: int, rank: int = 128):
-        super().__init__()
-        self.skipped_layers = skipped_layers
-        self.H_kv = H_kv
-        self.D = D
-        self.kv_dim = H_kv * D
-        self.down = nn.Linear(d_in, rank, bias=False)
-        self.up_k = nn.ModuleDict({str(l): nn.Linear(rank, self.kv_dim, bias=False) for l in skipped_layers})
-        self.up_v = nn.ModuleDict({str(l): nn.Linear(rank, self.kv_dim, bias=False) for l in skipped_layers})
-        
-        for mod in list(self.up_k.values()) + list(self.up_v.values()):
-            nn.init.zeros_(mod.weight)
+    def __init__(self, E: int, d_model: int):
+        self.E = E
+        self.d_model = d_model
+        # W_exit: [d, d]
+        self.W_exit = torch.zeros((d_model, d_model), dtype=torch.float32)
+        # S1 scales per skipped layer l >= E: {l: {"sk": float, "sv": float}}
+        self.scales: Dict[int, Dict[str, float]] = {}
 
-    def forward(self, h_E: torch.Tensor, layer_idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        r = self.down(h_E.float())
-        k_pred = self.up_k[str(layer_idx)](r).to(h_E.dtype)
-        v_pred = self.up_v[str(layer_idx)](r).to(h_E.dtype)
-        return k_pred, v_pred
+    def to(self, device: torch.device):
+        self.W_exit = self.W_exit.to(device)
+        return self
 
-
-class ExitHead(nn.Module):
-    """Linear tuned lens exit head at depth E."""
-    def __init__(self, d_model: int):
-        super().__init__()
-        self.linear = nn.Linear(d_model, d_model, bias=False)
-        nn.init.zeros_(self.linear.weight)
-
-    def forward(self, h_E: torch.Tensor) -> torch.Tensor:
-        orig_dtype = h_E.dtype
-        x = h_E.float()
-        return (x + self.linear(x)).to(orig_dtype)
-
-    def compute_logits(self, ctx: ModelContext, h_E: torch.Tensor) -> torch.Tensor:
-        trans_h = self.forward(h_E)
-        norm_h = ctx.m.model.norm(trans_h)
+    def predict_logits(self, ctx: ModelContext, h_E: torch.Tensor) -> torch.Tensor:
+        """Projects h_E through linear tuned lens into terminal norm + lm_head."""
+        h_aligned = h_E.float() + h_E.float() @ self.W_exit
+        norm_h = ctx.m.model.norm(h_aligned.to(h_E.dtype))
         return ctx.m.lm_head(norm_h)
+
+    def reconstruct_kv(
+        self,
+        lay,
+        h_E: torch.Tensor,
+        layer_idx: int,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        H_kv: int,
+        D: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Reconstructs upper KV using norm-calibrated projection."""
+        norm_l = lay.input_layernorm(h_E)
+        k_proj = lay.self_attn.k_proj(norm_l).view(1, 1, H_kv, D).transpose(1, 2)
+        v_proj = lay.self_attn.v_proj(norm_l).view(1, 1, H_kv, D).transpose(1, 2)
+        
+        # Apply fitted scale factors if available
+        if layer_idx in self.scales:
+            sk = self.scales[layer_idx].get("sk", 1.0)
+            sv = self.scales[layer_idx].get("sv", 1.0)
+            k_proj = k_proj * sk
+            v_proj = v_proj * sv
+            
+        k_synth = apply_rope(k_proj, cos, sin)
+        v_synth = v_proj
+        return k_synth, v_synth
+
+
+def calibrate_model_alignments(
+    ctx: ModelContext,
+    depths: List[int],
+    out_dir: str,
+    n_seqs: int = 150,
+    seq_len: int = 256,
+) -> Dict[int, CalibratedAlignment]:
+    """
+    Fits closed-form Ridge alignment for exit heads and S1 scale factors across depths.
+    Saves calibration to disk; takes ~60-90s on GPU and executes with zero backprop.
+    """
+    ckpt_dir = os.path.join(out_dir, "checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    alignments = {}
+    
+    # Check if all exist on disk
+    all_exist = True
+    for E in depths:
+        fn = os.path.join(ckpt_dir, f"align_E{E}.pt")
+        if not os.path.exists(fn):
+            all_exist = False
+            break
+            
+    if all_exist:
+        print(f" [Calibration] Loading existing alignment checkpoints from {ckpt_dir}...")
+        for E in depths:
+            data = torch.load(os.path.join(ckpt_dir, f"align_E{E}.pt"), map_location=ctx.device)
+            align = CalibratedAlignment(E, ctx.d)
+            align.W_exit = data["W_exit"].to(ctx.device)
+            align.scales = data["scales"]
+            alignments[E] = align
+        return alignments
+
+    print(f" [Calibration] Fitting closed-form linear exit lens & CheapPass scales over {n_seqs} calibration sequences...")
+    # Generate calibration token sequences
+    calib_texts = [
+        "Mathematics, physics, computer science, and engineering form the foundational disciplines of technical inquiry. "
+        "In artificial intelligence, large language models operate by predicting subsequent token probabilities given prior context.",
+        "The history of natural language processing evolved from rule-based grammars to statistical models, neural networks, and modern transformers.",
+        "Thermodynamics dictates that entropy never decreases in isolated systems. Energy conservation ensures momentum and mass balance.",
+        "Algorithmic efficiency is measured via asymptotic time and space complexity, utilizing Big-O notation to characterize scaling.",
+    ] * (n_seqs // 4 + 1)
+    calib_texts = calib_texts[:n_seqs]
+    
+    # Streaming accumulation of X^T X and X^T Y for exit heads, and norm sums for S1
+    device = ctx.device
+    d = ctx.d
+    
+    # Prepare accumulators per depth E
+    XtX = {E: torch.zeros((d, d), dtype=torch.float64, device=device) for E in depths}
+    XtY = {E: torch.zeros((d, d), dtype=torch.float64, device=device) for E in depths}
+    
+    # Scale factor accumulators: {E: {l: {"dot_k": 0.0, "norm_k": 0.0, "dot_v": 0.0, "norm_v": 0.0}}}
+    scale_acc = {E: {l: {"dot_k": 0.0, "norm_k": 0.0, "dot_v": 0.0, "norm_v": 0.0} for l in range(E, ctx.N)} for E in depths}
+
+    with torch.no_grad():
+        for text in calib_texts:
+            tokens = ctx.tok(text, return_tensors="pt", truncation=True, max_length=seq_len).input_ids.to(device)
+            if tokens.shape[1] < 16:
+                continue
+                
+            # Run forward pass, collecting hidden states
+            res = ctx.m(tokens, output_hidden_states=True, use_cache=True)
+            hs = res.hidden_states  # Tuple of N+1 tensors: hs[0] .. hs[N]
+            h_L = hs[ctx.N][0].float()  # [T, d]
+            
+            past_kv = res.past_key_values
+            
+            for E in depths:
+                h_E = hs[E][0].float()  # [T, d]
+                delta = h_L - h_E       # [T, d]
+                
+                # Accumulate for Ridge
+                XtX[E] += (h_E.T @ h_E).to(torch.float64)
+                XtY[E] += (h_E.T @ delta).to(torch.float64)
+                
+                # Accumulate for S1 scales
+                for l in range(E, ctx.N):
+                    k_true, v_true = extract_kv_from_cache(past_kv, l)
+                    # Compute native projection from h_E
+                    norm_E = ctx.layers[l].input_layernorm(hs[E])
+                    k_pred = ctx.layers[l].self_attn.k_proj(norm_E).view(1, -1, ctx.H_kv, ctx.D).transpose(1, 2)
+                    v_pred = ctx.layers[l].self_attn.v_proj(norm_E).view(1, -1, ctx.H_kv, ctx.D).transpose(1, 2)
+                    
+                    dot_k = (k_true.float() * k_pred.float()).sum().item()
+                    norm_k = (k_pred.float() ** 2).sum().item()
+                    dot_v = (v_true.float() * v_pred.float()).sum().item()
+                    norm_v = (v_pred.float() ** 2).sum().item()
+                    
+                    scale_acc[E][l]["dot_k"] += dot_k
+                    scale_acc[E][l]["norm_k"] += norm_k
+                    scale_acc[E][l]["dot_v"] += dot_v
+                    scale_acc[E][l]["norm_v"] += norm_v
+
+    # Solve Ridge systems and finalize scale factors
+    lam = 1e-2
+    for E in depths:
+        reg = lam * torch.eye(d, dtype=torch.float64, device=device)
+        W_sol = torch.linalg.solve(XtX[E] + reg, XtY[E]).to(torch.float32)
+        
+        scales = {}
+        for l in range(E, ctx.N):
+            sk = scale_acc[E][l]["dot_k"] / max(scale_acc[E][l]["norm_k"], 1e-8)
+            sv = scale_acc[E][l]["dot_v"] / max(scale_acc[E][l]["norm_v"], 1e-8)
+            scales[l] = {"sk": float(sk), "sv": float(sv)}
+            
+        align = CalibratedAlignment(E, d)
+        align.W_exit = W_sol
+        align.scales = scales
+        alignments[E] = align
+        
+        # Save to disk
+        torch.save({"W_exit": W_sol.cpu(), "scales": scales}, os.path.join(ckpt_dir, f"align_E{E}.pt"))
+        print(f"  [E={E}] Solved Ridge W_exit: |W|_F={torch.norm(W_sol):.3f} | Layer {ctx.N-1} scales: sk={scales[ctx.N-1]['sk']:.3f}, sv={scales[ctx.N-1]['sv']:.3f}")
+
+    print(" [Calibration] Closed-form alignments successfully fitted and cached.")
+    return alignments
 
 
 # ============================================================================
@@ -291,21 +418,15 @@ def forward_single_token_layer(
     D: int,
     rep: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Executes a single decoder layer for one token via standard projection and attention math.
-    Bypasses private HuggingFace layer kwargs to prevent version and argument signature mismatches.
-    """
-    # h: [1, 1, d]
+    """Executes a single decoder layer for one token via standard projection and attention math."""
     n = lay.input_layernorm(h)
-    q = lay.self_attn.q_proj(n).view(1, 1, H_q, D).transpose(1, 2)    # [1, H_q, 1, D]
-    k = lay.self_attn.k_proj(n).view(1, 1, H_kv, D).transpose(1, 2)   # [1, H_kv, 1, D]
-    v = lay.self_attn.v_proj(n).view(1, 1, H_kv, D).transpose(1, 2)   # [1, H_kv, 1, D]
+    q = lay.self_attn.q_proj(n).view(1, 1, H_q, D).transpose(1, 2)
+    k = lay.self_attn.k_proj(n).view(1, 1, H_kv, D).transpose(1, 2)
+    v = lay.self_attn.v_proj(n).view(1, 1, H_kv, D).transpose(1, 2)
 
-    # Apply RoPE
     q = apply_rope(q, cos, sin)
     k = apply_rope(k, cos, sin)
 
-    # Append to past KV cache
     if past_k is not None:
         k_full = torch.cat([past_k, k], dim=2)
         v_full = torch.cat([past_v, v], dim=2)
@@ -313,7 +434,6 @@ def forward_single_token_layer(
         k_full = k
         v_full = v
 
-    # Repeat KV for Grouped-Query Attention (GQA)
     if rep > 1:
         k_attn = k_full.repeat_interleave(rep, dim=1)
         v_attn = v_full.repeat_interleave(rep, dim=1)
@@ -322,9 +442,9 @@ def forward_single_token_layer(
         v_attn = v_full
 
     scale = D ** -0.5
-    scores = torch.matmul(q, k_attn.transpose(-1, -2)) * scale  # [1, H_q, 1, T]
+    scores = torch.matmul(q, k_attn.transpose(-1, -2)) * scale
     attn_weights = F.softmax(scores, dim=-1)
-    attn_out = torch.matmul(attn_weights.to(v_attn.dtype), v_attn)  # [1, H_q, 1, D]
+    attn_out = torch.matmul(attn_weights.to(v_attn.dtype), v_attn)
     attn_out = attn_out.transpose(1, 2).reshape(1, 1, H_q * D)
 
     h_out = h + lay.self_attn.o_proj(attn_out)
@@ -339,15 +459,13 @@ def generate_under_policy(
     policy: str,
     target_depth: int,
     tau: Optional[float] = None,
-    adapter: Optional[CheapPassLinearAdapter] = None,
-    exit_head: Optional[ExitHead] = None,
+    alignment: Optional[CalibratedAlignment] = None,
     max_new_tokens: int = 256,
     stop_tokens: Optional[List[int]] = None,
     available_depths: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """
-    Executes true layer-skipping autoregressive generation with exact tracking of executed layers.
-    Bypasses upper transformer layers E..N-1 and reconstructs KV caches via CheapPass/Native/Direct.
+    Executes true layer-skipping autoregressive generation with calibrated exit heads and KV continuity.
     """
     if stop_tokens is None:
         stop_tokens = [ctx.tok.eos_token_id] if ctx.tok.eos_token_id is not None else []
@@ -365,7 +483,7 @@ def generate_under_policy(
     outputs = ctx.m(curr_ids, use_cache=True)
     past_key_values = outputs.past_key_values
     
-    # Unpack past key values into list of (k, v) tensors via robust helper
+    # Extract past key values into list of (k, v) tensors via robust helper
     kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
     for l in range(ctx.N):
         k, v = extract_kv_from_cache(past_key_values, l)
@@ -450,14 +568,14 @@ def generate_under_policy(
             norm_h = ctx.m.model.norm(h)
             logits = ctx.m.lm_head(norm_h)
         else:
-            if exit_head is not None:
-                logits = exit_head.compute_logits(ctx, h)
+            # Intermediate exit prediction
+            if alignment is not None:
+                logits = alignment.predict_logits(ctx, h)
             else:
                 norm_h = ctx.m.model.norm(h)
                 logits = ctx.m.lm_head(norm_h)
                 
             # Fill upper KV cache entries for skipped layers exit_depth .. N-1
-            B, T_in, _ = h.shape
             for l in range(exit_depth, ctx.N):
                 lay = ctx.layers[l]
                 past_k, past_v = kv_cache[l]
@@ -474,13 +592,9 @@ def generate_under_policy(
                     k_synth = apply_rope(k_proj, cos, sin)
                     v_synth = v_proj
                 else:
-                    # CheapPass Reconstruction
-                    if adapter is not None:
-                        k_pred, v_pred = adapter(h, l)
-                        k_proj = k_pred.view(1, 1, ctx.H_kv, ctx.D).transpose(1, 2)
-                        v_proj = v_pred.view(1, 1, ctx.H_kv, ctx.D).transpose(1, 2)
-                        k_synth = apply_rope(k_proj, cos, sin)
-                        v_synth = v_proj
+                    # CheapPass Reconstruction (Norm-calibrated S1)
+                    if alignment is not None:
+                        k_synth, v_synth = alignment.reconstruct_kv(lay, h, l, cos, sin, ctx.H_kv, ctx.D)
                     else:
                         norm_l = lay.input_layernorm(h)
                         k_proj = lay.self_attn.k_proj(norm_l).view(1, 1, ctx.H_kv, ctx.D).transpose(1, 2)
@@ -515,7 +629,15 @@ def generate_under_policy(
 # 6. Benchmark Suite Evaluators
 # ============================================================================
 
-def run_gsm8k_benchmark(ctx: ModelContext, policy: str, target_depth: int, tau: Optional[float], n_samples: int = 50) -> Dict[str, Any]:
+def run_gsm8k_benchmark(
+    ctx: ModelContext,
+    policy: str,
+    target_depth: int,
+    tau: Optional[float],
+    alignment: Optional[CalibratedAlignment] = None,
+    available_depths: Optional[List[int]] = None,
+    n_samples: int = 50,
+) -> Dict[str, Any]:
     """Runs GSM8K 5-shot evaluation under specified policy."""
     samples = []
     try:
@@ -544,7 +666,16 @@ def run_gsm8k_benchmark(ctx: ModelContext, policy: str, target_depth: int, tau: 
     for idx, (q, true_ans) in enumerate(samples):
         prompt = GSM8K_5SHOT_PROMPT + f"Question: {q}\nAnswer:"
         ids = ctx.tok(prompt, return_tensors="pt").input_ids
-        res = generate_under_policy(ctx, ids, policy=policy, target_depth=target_depth, tau=tau, max_new_tokens=128)
+        res = generate_under_policy(
+            ctx,
+            ids,
+            policy=policy,
+            target_depth=target_depth,
+            tau=tau,
+            alignment=alignment,
+            available_depths=available_depths,
+            max_new_tokens=128,
+        )
         pred_ans = extract_gsm8k_answer(res["text"])
         is_match = (pred_ans is not None and pred_ans == true_ans)
         if is_match:
@@ -563,14 +694,31 @@ def run_gsm8k_benchmark(ctx: ModelContext, policy: str, target_depth: int, tau: 
     }
 
 
-def run_speed_benchmark(ctx: ModelContext, policy: str, target_depth: int, tau: Optional[float], n_runs: int = 10) -> float:
+def run_speed_benchmark(
+    ctx: ModelContext,
+    policy: str,
+    target_depth: int,
+    tau: Optional[float],
+    alignment: Optional[CalibratedAlignment] = None,
+    available_depths: Optional[List[int]] = None,
+    n_runs: int = 10,
+) -> float:
     """Measures tokens per second using hardware CUDA events on batch size 1."""
     prompt = "Explain the fundamental principles of thermodynamics and energy conservation."
     ids = ctx.tok(prompt, return_tensors="pt").input_ids.to(ctx.device)
     
     # Warmup
     for _ in range(2):
-        _ = generate_under_policy(ctx, ids, policy=policy, target_depth=target_depth, tau=tau, max_new_tokens=32)
+        _ = generate_under_policy(
+            ctx,
+            ids,
+            policy=policy,
+            target_depth=target_depth,
+            tau=tau,
+            alignment=alignment,
+            available_depths=available_depths,
+            max_new_tokens=32,
+        )
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
@@ -581,13 +729,31 @@ def run_speed_benchmark(ctx: ModelContext, policy: str, target_depth: int, tau: 
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
             start_event.record()
-            res = generate_under_policy(ctx, ids, policy=policy, target_depth=target_depth, tau=tau, max_new_tokens=64)
+            res = generate_under_policy(
+                ctx,
+                ids,
+                policy=policy,
+                target_depth=target_depth,
+                tau=tau,
+                alignment=alignment,
+                available_depths=available_depths,
+                max_new_tokens=64,
+            )
             end_event.record()
             torch.cuda.synchronize()
             elapsed_sec = start_event.elapsed_time(end_event) / 1000.0
         else:
             t0 = time.time()
-            res = generate_under_policy(ctx, ids, policy=policy, target_depth=target_depth, tau=tau, max_new_tokens=64)
+            res = generate_under_policy(
+                ctx,
+                ids,
+                policy=policy,
+                target_depth=target_depth,
+                tau=tau,
+                alignment=alignment,
+                available_depths=available_depths,
+                max_new_tokens=64,
+            )
             elapsed_sec = time.time() - t0
             
         times.append(elapsed_sec)
@@ -638,6 +804,9 @@ def main():
         model.eval()
         ctx = ModelContext(model, tok)
 
+    # Automated Calibration: Fit closed-form exit heads and CheapPass S1 scale factors
+    alignments = calibrate_model_alignments(ctx, depths, out_dir=args.out_dir, n_seqs=120 if not args.selftest else 10)
+
     results = {
         "meta": {
             "model": args.model,
@@ -662,11 +831,12 @@ def main():
     }
     print(f"  [Backbone] GSM8K Acc: {bb_gsm8k['accuracy']:.2f}% | Speed: {bb_tok_s:.1f} tok/s | Executed Layers: {ctx.N:.1f}")
 
-    # 2. Policy A: Fixed Depths
-    print("\n --- 2. Evaluating Policy A (Fixed Exit Depths) ---")
+    # 2. Policy A: Fixed Depths with Calibrated Alignments
+    print("\n --- 2. Evaluating Policy A (Fixed Exit Depths with CheapPass Alignment) ---")
     for E in depths:
-        spd = run_speed_benchmark(ctx, policy="Policy_A", target_depth=E, tau=None, n_runs=5 if not args.selftest else 2)
-        eval_res = run_gsm8k_benchmark(ctx, policy="Policy_A", target_depth=E, tau=None, n_samples=10 if args.selftest else 50)
+        align_E = alignments.get(E)
+        spd = run_speed_benchmark(ctx, policy="Policy_A", target_depth=E, tau=None, alignment=align_E, n_runs=5 if not args.selftest else 2)
+        eval_res = run_gsm8k_benchmark(ctx, policy="Policy_A", target_depth=E, tau=None, alignment=align_E, n_samples=10 if args.selftest else 50)
         speedup = spd / max(bb_tok_s, 1e-6)
         results["policy_a"][f"E_{E}"] = {
             "gsm8k_acc": eval_res["accuracy"],
@@ -677,10 +847,12 @@ def main():
         print(f"  [Policy A E={E}] Acc: {eval_res['accuracy']:.2f}% | Exec Layers: {eval_res['avg_executed_layers']:.1f} | Speedup: {speedup:.2f}x")
 
     # 3. Policy B: River Cosine Gate applied to CheapPass
-    print("\n --- 3. Evaluating Policy B (River Cosine Gate) ---")
+    print("\n --- 3. Evaluating Policy B (River Cosine Gate with Available Depths) ---")
     for tau in taus:
-        spd = run_speed_benchmark(ctx, policy="Policy_B", target_depth=depths[-1], tau=tau, n_runs=5 if not args.selftest else 2)
-        eval_res = run_gsm8k_benchmark(ctx, policy="Policy_B", target_depth=depths[-1], tau=tau, n_samples=10 if args.selftest else 50)
+        # Use deepest alignment or multi-depth alignment
+        align_E = alignments.get(depths[-1])
+        spd = run_speed_benchmark(ctx, policy="Policy_B", target_depth=depths[-1], tau=tau, alignment=align_E, available_depths=depths, n_runs=5 if not args.selftest else 2)
+        eval_res = run_gsm8k_benchmark(ctx, policy="Policy_B", target_depth=depths[-1], tau=tau, alignment=align_E, available_depths=depths, n_samples=10 if args.selftest else 50)
         speedup = spd / max(bb_tok_s, 1e-6)
         results["policy_b"][f"tau_{tau}"] = {
             "gsm8k_acc": eval_res["accuracy"],
