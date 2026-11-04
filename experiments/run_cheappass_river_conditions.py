@@ -139,7 +139,7 @@ def extract_math_answer(text: str) -> Optional[str]:
 
 
 # ============================================================================
-# 3. Model Wrapper & State-Transition Monitoring
+# 3. Model Wrapper & Cache Helpers
 # ============================================================================
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -150,8 +150,55 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     # x: [1, H, 1, D]
-    # cos, sin: [1, 1, D]
-    return (x * cos.unsqueeze(1)) + (rotate_half(x) * sin.unsqueeze(1))
+    # cos, sin: [1, 1, D] or [1, 1, 1, D]
+    if cos.dim() == 3:
+        cos = cos.unsqueeze(1)
+        sin = sin.unsqueeze(1)
+    return (x * cos) + (rotate_half(x) * sin)
+
+
+def extract_kv_from_cache(cache, layer_idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Robustly extracts (key, value) tensors for layer_idx across all transformers cache versions."""
+    # 1. Modern DynamicCache (transformers >= 4.47/4.48): cache.layers[layer_idx].keys / values
+    if hasattr(cache, "layers") and isinstance(cache.layers, (list, tuple)) and layer_idx < len(cache.layers):
+        lay = cache.layers[layer_idx]
+        if hasattr(lay, "keys") and hasattr(lay, "values"):
+            return lay.keys, lay.values
+        if hasattr(lay, "key_states") and hasattr(lay, "value_states"):
+            return lay.key_states, lay.value_states
+
+    # 2. DynamicCache (transformers 4.36 - 4.46): cache.key_cache / value_cache
+    if hasattr(cache, "key_cache") and hasattr(cache, "value_cache"):
+        if layer_idx < len(cache.key_cache):
+            return cache.key_cache[layer_idx], cache.value_cache[layer_idx]
+
+    # 3. Method to_legacy_cache()
+    if hasattr(cache, "to_legacy_cache"):
+        try:
+            legacy = cache.to_legacy_cache()
+            return legacy[layer_idx]
+        except Exception:
+            pass
+
+    # 4. Direct indexing
+    try:
+        item = cache[layer_idx]
+        if isinstance(item, (tuple, list)) and len(item) == 2:
+            return item[0], item[1]
+    except Exception:
+        pass
+
+    # 5. Fallback via iteration
+    try:
+        cache_list = list(cache)
+        if layer_idx < len(cache_list):
+            item = cache_list[layer_idx]
+            if isinstance(item, (tuple, list)) and len(item) == 2:
+                return item[0], item[1]
+    except Exception:
+        pass
+
+    raise RuntimeError(f"Could not extract key/value states for layer {layer_idx} from cache type {type(cache)}")
 
 
 class ModelContext:
@@ -318,14 +365,10 @@ def generate_under_policy(
     outputs = ctx.m(curr_ids, use_cache=True)
     past_key_values = outputs.past_key_values
     
-    # Unpack past key values into list of (k, v) tensors
+    # Unpack past key values into list of (k, v) tensors via robust helper
     kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
     for l in range(ctx.N):
-        if hasattr(past_key_values, "key_cache"):
-            k = past_key_values.key_cache[l]
-            v = past_key_values.value_cache[l]
-        else:
-            k, v = past_key_values[l]
+        k, v = extract_kv_from_cache(past_key_values, l)
         kv_cache.append((k, v))
 
     next_token = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
@@ -350,54 +393,27 @@ def generate_under_policy(
         if ctx.rotary is not None:
             pos_emb = ctx.rotary(h, pos_ids)
             cos, sin = pos_emb
-            if cos.dim() == 2:
+            while cos.dim() < 3:
                 cos = cos.unsqueeze(0)
                 sin = sin.unsqueeze(0)
+            while cos.dim() > 3:
+                cos = cos.squeeze(1)
+                sin = sin.squeeze(1)
         else:
             cos = torch.ones((1, 1, ctx.D), device=device, dtype=ctx.dtype)
             sin = torch.zeros((1, 1, ctx.D), device=device, dtype=ctx.dtype)
             
-        # Determine exit point
-        if policy == "Backbone":
-            exit_depth = ctx.N
-        elif policy in ("Policy_A", "Native", "DirectCopy"):
-            exit_depth = target_depth
-        elif policy == "Policy_B":
-            exit_depth = ctx.N
-            h_probe = h
-            for l_idx in range(ctx.N):
-                h_in = h_probe
-                # Compute layer output on probe token
-                h_out, _, _ = forward_single_token_layer(
-                    ctx.layers[l_idx],
-                    h_in,
-                    None,
-                    None,
-                    cos,
-                    sin,
-                    ctx.H_q,
-                    ctx.H_kv,
-                    ctx.D,
-                    ctx.rep,
-                )
-                cos_sim = ctx.compute_cosine_similarity(h_in, h_out)
-                if cos_sim >= tau:
-                    raw_exit = l_idx + 1
-                    valid = [d for d in available_depths if d >= raw_exit]
-                    exit_depth = min(valid) if valid else ctx.N
-                    break
-                h_probe = h_out
-        else:
-            exit_depth = ctx.N
-
-        # Execute only layers 0 .. exit_depth - 1
+        # Forward layer-by-layer up to exit point
+        exit_depth = ctx.N
         last_k, last_v = None, None
-        for l in range(exit_depth):
+        
+        for l in range(ctx.N):
             lay = ctx.layers[l]
             past_k, past_v = kv_cache[l]
+            h_in = h
             h, k_new_full, v_new_full = forward_single_token_layer(
                 lay,
-                h,
+                h_in,
                 past_k,
                 past_v,
                 cos,
@@ -411,6 +427,22 @@ def generate_under_policy(
             last_k = k_new_full[:, :, -1:, :]
             last_v = v_new_full[:, :, -1:, :]
             
+            # Check exit policy
+            if policy == "Backbone":
+                pass
+            elif policy in ("Policy_A", "Native", "DirectCopy") and (l + 1) == target_depth:
+                exit_depth = l + 1
+                break
+            elif policy == "Policy_B":
+                cos_sim = ctx.compute_cosine_similarity(h_in, h)
+                if cos_sim >= tau:
+                    raw_exit = l + 1
+                    valid = [d for d in available_depths if d >= raw_exit]
+                    target_E = min(valid) if valid else ctx.N
+                    if (l + 1) >= target_E:
+                        exit_depth = l + 1
+                        break
+                        
         executed_layers_list.append(exit_depth)
         
         # Next token prediction
