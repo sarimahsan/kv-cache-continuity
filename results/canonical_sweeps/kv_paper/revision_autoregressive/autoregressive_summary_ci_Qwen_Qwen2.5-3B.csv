@@ -1,7 +1,0 @@
-depth,rel_depth,policy,num_prompts,prompt_prefill,first_div_mean,first_div_ci_lower,first_div_ci_upper,match64_mean,match64_ci_lower,match64_ci_upper,match128_mean,match128_ci_lower,match128_ci_upper
-18,50.0%,Native Proj,64,oracle,3.5,3.16,3.86,6.84,6.15,7.57,4.1,3.86,4.37
-18,50.0%,Direct Copy,64,oracle,2.62,2.39,2.88,5.66,4.86,6.42,3.71,3.32,4.09
-24,66.7%,Native Proj,64,oracle,4.12,3.28,5.06,8.98,7.45,10.57,4.88,4.09,5.68
-24,66.7%,Direct Copy,64,oracle,5.5,4.67,6.39,11.13,9.64,12.79,6.15,5.52,6.82
-30,83.3%,Native Proj,64,oracle,4.88,3.95,5.88,12.7,10.86,14.28,6.64,5.74,7.56
-30,83.3%,Direct Copy,64,oracle,9.5,7.72,11.41,18.16,15.45,21.0,9.57,8.18,11.01

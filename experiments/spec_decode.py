@@ -37,6 +37,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 # Ensure current directory is in sys.path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vkr2 import Ctx, boot_ci, set_seed
+from cheap_pass import DataSplits
 from exit_head import ExitHead, compute_head_cost
 
 
