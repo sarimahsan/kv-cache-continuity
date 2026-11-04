@@ -45,7 +45,7 @@ This benchmark evaluates **CheapPass** under River-LLM's exact experimental prot
 
 | Benchmark | Paper Backbone | Paper River ($\tau=0.5$)<br>[Acc / Layer / Spd] | Paper River ($\tau=0.7$)<br>[Acc / Layer / Spd] | Our Backbone<br>[Acc / tok/s] | Our Full-Quant<br>[4-bit Spd] | CheapPass Policy A<br>($E=4, 8, 12$) | CheapPass Policy B ($\tau=0.5$)<br>[$\Delta$Acc / Avg Layer / Spd] | CheapPass Policy B ($\tau=0.7$)<br>[$\Delta$Acc / Avg Layer / Spd] |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **GSM8K** *(5-shot)* | 33.5 *(Table 2)*<br>33.2 *(Table 3)* | 29.3 / 3.79 / **2.16x** | 33.5 / 15.05 / — | *[Pending A100]* | *[Pending A100]* | *[Pending A100]* | *[Pending A100]* | *[Pending A100]* |
+| **GSM8K** *(5-shot)* | 33.5 *(Table 2)*<br>33.2 *(Table 3)* | 29.3 / 3.79 / **2.16x** | 33.5 / 15.05 / — | **40.0%** / 47.0 tok/s | *[Pending]* | E=4: 0.0% (86.5 t/s, **1.84x**)<br>E=8: 0.0% (67.4 t/s, **1.43x**)<br>E=12: 0.0% (56.1 t/s, **1.19x**) | 0.0% / 4.09 / **1.75x** (82.2 tok/s) | 0.0% / 4.32 / **1.75x** (82.4 tok/s) |
 | **MATH** *(4-shot)* | 17.8 | 14.6 / 3.56 / **1.88x** | 17.0 / 14.67 / — | *[Pending A100]* | *[Pending A100]* | *[Pending A100]* | *[Pending A100]* | *[Pending A100]* |
 | **HumanEval** *(0-shot)* | 25.8 | 23.2 / 2.30 / **1.71x** | 25.7 / 10.05 / — | *[Pending A100]* | *[Pending A100]* | *[Pending A100]* | *[Pending A100]* | *[Pending A100]* |
 | **BoolQ** *(0-shot)* | 69.4 | 67.5 / 3.90 / — | 69.2 / 15.02 / — | *[Pending A100]* | — | *[Pending A100]* | *[Pending A100]* | *[Pending A100]* |
