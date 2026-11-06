@@ -1,0 +1,36 @@
+{
+  "meta": {
+    "model": "Qwen/Qwen2.5-3B",
+    "depth": 18,
+    "n_seq": 500,
+    "noise_floor_fp16": 1.495e-05
+  },
+  "assertions": {
+    "oracle_identity": {
+      "kl": 0.0,
+      "top1": 100.0,
+      "passed": true
+    },
+    "zero_init_invariance": {
+      "max_logit_diff": 0.0,
+      "passed": true
+    },
+    "noise_floor_nats": 1.495e-05
+  },
+  "harness_cells": {
+    "Current_T512_SelfExact": {
+      "self_exact": true,
+      "seq_len": 512,
+      "kl_mean": 0.768037,
+      "kl_ci95": [0.7516, 0.7838],
+      "top1_mean": 59.654,
+      "top1_ci95": [59.18, 60.10]
+    },
+    "Legacy_T64_SelfApprox": {
+      "self_exact": false,
+      "seq_len": 64,
+      "kl_mean": 0.7335,
+      "top1_mean": 70.9
+    }
+  }
+}

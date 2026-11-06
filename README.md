@@ -6,7 +6,7 @@
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests/)
 
-Official research code and canonical empirical results for the paper:  
+Official research codebase and canonical empirical results for:  
 **"Separating Attention Memory from Readout Error in Depth-Adaptive Transformers: Preserving KV-Cache Continuity via Native State Projection"**  
 *Syed Muhammad Sarim Ahsan (Sir Syed University of Engineering and Technology)*  
 Repository: [https://github.com/sarimahsan/kv-cache-continuity](https://github.com/sarimahsan/kv-cache-continuity)
@@ -19,7 +19,7 @@ Depth-adaptive inference (early exiting, layer skipping, and self-speculative de
 1. **Attention Memory Poisoning ($\mathcal{E}_{\text{attn}}$)**: Inaccurate Key-Value (KV) cache entries stored by shallow exits corrupt downstream attention in future tokens.
 2. **Unembedding Manifold Mismatch ($\mathcal{E}_{\text{readout}}$)**: Intermediate hidden states reside off the terminal unembedding manifold, degrading immediate logit readout.
 
-This repository implements a **teacher-forced causal disentanglement protocol** that isolates $\mathcal{E}_{\text{attn}}$ from $\mathcal{E}_{\text{readout}}$ on frozen base foundation models (`Qwen/Qwen2.5-3B`, `Qwen/Qwen2.5-7B`, `meta-llama/Llama-3.2-1B`) with zero base-model weight modification.
+This repository implements a **teacher-forced causal disentanglement protocol** that isolates $\mathcal{E}_{\text{attn}}$ from $\mathcal{E}_{\text{readout}}$ on frozen base foundation models (`Qwen/Qwen2.5-3B`, `Qwen/Qwen2.5-7B`, `Qwen/Qwen2.5-14B`, `meta-llama/Llama-3.2-1B`, `meta-llama/Llama-3.1-8B`) with zero base-model weight modification.
 
 ```
                           Teacher-Forced Disentanglement Protocol
@@ -37,7 +37,7 @@ This repository implements a **teacher-forced causal disentanglement protocol** 
 
 1. **Native KV State Projection Preserves Attention Continuity**:
    By projecting intermediate representations through native, pre-trained Key/Value projection matrices ($W_K, W_V + \mathrm{LN}_1$) of skipped layers, attention cache error falls below the 1-bit mutual information threshold ($\bar{D}_{\mathrm{KL}} \le \ln 2 \approx 0.6931\text{ nats}$) at:
-   - **Qwen2.5-3B**: Depth $L \ge 22$ ($61.1\%$ depth, $\bar{D}_{\mathrm{KL}} = 0.538\text{ nats}$).
+   - **Qwen2.5-3B**: Depth $L \ge 24$ ($66.7\%$ depth, $\bar{D}_{\mathrm{KL}} = 0.571 \pm 0.025\text{ nats}$ across 3 seeds).
    - **Llama-3.2-1B**: Depth $L \ge 8$ ($50.0\%$ depth, $\bar{D}_{\mathrm{KL}} = 0.590 \pm 0.015\text{ nats}$ across 3 seeds).
    - **Qwen2.5-7B**: Depth $L = 24$ ($85.7\%$ depth, $\bar{D}_{\mathrm{KL}} = 0.303\text{ nats}$).
    The mechanism scales stably to $T=4{,}096$ tokens context length without drift explosion.
@@ -46,13 +46,13 @@ This repository implements a **teacher-forced causal disentanglement protocol** 
    $\mathcal{E}_{\text{readout}}$ accounts for over $90\%$ of total divergence at early layers. Intermediate representations cannot be reliably mapped to the vocabulary via linear heads alone.
 
 3. **Value Cache Drift Substantially Exceeds Key Cache Drift**:
-   Layer-wise Shapley causal swap ablations reveal that Value cache errors account for $60.3\%\text{--}82.1\%$ of attention corruption across architectures, confirming theoretical bounds on softmax attention stability.
+   Layer-wise Shapley causal swap ablations reveal that Value cache errors account for $64.5\%\text{--}82.1\%$ of attention corruption across architectures under all-position evaluation, confirming theoretical bounds on softmax attention stability. Under historical-only substitution (`self_exact = True`), Value share approaches parity at deeper exits while off-diagonal Key routing error dominates on Llama-3.2-1B.
 
-4. **10,000-Step Adapter Ceiling on Open-Domain WikiText-2**:
-   Bottleneck adapters ($r=512$, GELU, trained for 10,000 steps / 1.28M tokens) plateau between $41.5\%$ and $55.0\%$ top-1 agreement across depths $18\dots30$, illustrating the fundamental gap between canonical prompt memorization and genuine out-of-sample vocabulary prediction.
+4. **Linear & Affine Residual Structure**:
+   Cross-layer KV transport is predominantly linear. Closed-form per-channel affine calibration ($S3$/$S4$, 18.4K–36.9K parameters, no gradient descent) recovers $62\%\text{--}71\%$ of a rank-128 adapter's gain, and closed-form ridge regression achieves $99.9\%\text{--}102.1\%$ gap closure in seconds.
 
-5. **Mixed-Exit Joint Execution & Rollouts**:
-   In multi-prompt autoregressive generation ($N=64$ sequences), Native Projection retains $68.4\%$ top-1 agreement and $64.8\%$ exact match rate, compared to complete collapse under Cache Omission ($0\%$ exact match, perplexity $> 10^5$).
+5. **Multi-Task Controlled Evaluation vs. River-LLM**:
+   On Llama-3.2-1B and Llama-3.1-8B across 8 standard benchmarks (MMLU, ARC-c, ARC-e, HellaSwag, BoolQ, GSM8K, MATH, HumanEval), Native Projection and CheapPass prevent catastrophic attention collapse, recovering $48.7\%\text{--}50.7\%$ on 8B MMLU at 50% depth where Direct Copy (River-LLM's KV-Share) falls to chance ($22.7\%$).
 
 ---
 
@@ -60,50 +60,37 @@ This repository implements a **teacher-forced causal disentanglement protocol** 
 
 ```text
 kv_cache_continuity/
-├── EXPERIMENT_CHEAP_PASS_GUIDE.md   # Step-by-step protocol for Cheap-Pass KV Adapter experiment
-├── LITERATURE_REVIEW_GUIDE.md       # Literature search brief, academic clusters & AI search prompts
-├── PAPER_SUMMARY_AND_FINDINGS.md    # Executive summary of claims, findings, and empirical bounds
-├── SOLUTION_AND_EMPIRICAL_RESULTS.md# Detailed technical architectures (Native Proj + Partial Verification)
-├── checkpoints/                     # Trained lightweight adapters & tuned lens heads
-├── doc/                             # Technical specifications & documentation
+├── doc/                             # Technical documentation & formal specifications
 │   ├── README.md                    # Documentation index
-│   ├── SELF_SPECULATIVE_DECODING_MATHEMATICAL_SPEC.md # Mathematical cost model & breakeven laws
-│   └── archive/                     # Historical review rebuttals & prior runbooks
-├── experiments/                     # Executable experimental engines & plotting scripts
-│   ├── README.md                    # Complete index of all experiment scripts
-│   ├── paper.py                     # Unified benchmark closing all reviewer items (Table 1, rollouts, latency)
-│   ├── cheap_pass.py                # Learned "Cheap Pass" KV Adapter training & evaluation engine
-│   ├── plot_cheap_pass.py           # Publication-grade plotting for cheap pass adapters
-│   ├── plot_rank_sweep.py           # Publication plot for asymptotic capacity-vs-information sweep
-│   ├── vkr1_value_repair.py         # Phase 1: Value-targeted Key-Value Repair (alias: vkr.py)
-│   ├── vkr2_unified_repair.py       # Phase 2: Unified KV Repair with KVC & bootstrap CIs (alias: vkr2.py)
-│   ├── vkr3_multi_angle_repair.py   # Phase 3: Seven-Angle Multi-Investigation Suite (alias: vkr3.py)
-│   ├── sol1_refinement_attention.py # Cross-attention refinement bridge
-│   ├── sol2_residual_unembed.py     # Residual unembedding adapter
-│   └── sol3_value_only_repair.py    # Value-only KVC repair (demonstrates Values dominate error)
+│   ├── protocol.md                  # Standardized experimental protocol definition
+│   └── SELF_SPECULATIVE_DECODING_MATHEMATICAL_SPEC.md # Cost model & breakeven laws
+├── experiments/                     # Executable experimental engines & evaluation suites
+│   ├── isolate_kv_ablation.py       # Primary 3-condition causal disentanglement runner
+│   ├── run_cheappass_river_conditions.py # Controlled 8-task River-LLM condition benchmark
+│   ├── cheap_pass.py                # Learned CheapPass KV adapter engine
+│   ├── vkr2_unified_repair.py       # Unified KVC vs. HSM repair with bootstrap CIs
+│   ├── mixed_depth_eval.py          # Confidence-gated mixed-depth decoding profiler
+│   ├── run_autoregressive_generation.py # Multi-prompt free-running generation profiler
+│   └── legacy_sweeps/               # Standalone diagnostic & self-speculative benchmarks
 ├── results/                         # Canonical empirical benchmarks, logs & figures
-│   ├── README.md                    # Master directory index of results
-│   ├── vkr/                         # Phase 1 & 2 results (Qwen-3B multi-seed, Llama-3.2-1B)
-│   ├── vkr3/                        # Phase 3 results (rank sweep, shadow trunk, coadapt/joint, exithead)
-│   ├── canonical_sweeps/            # Systematic depth, length (T=4096), and domain sweeps
-│   └── figures/                     # Publication vector plots and visualizations
-├── src/                             # Core inference engines, routers & KV caches
-└── tests/                           # Unit tests and audit integrity suites
-```
-│   ├── qwen_dynamic.py                   # Dynamic depth-truncated Qwen model engine
-│   ├── kv_cache.py                       # Static & native-projected KV cache managers
-│   ├── exit_adapter.py                   # SingleExitAdapter & ExitCalibrationModule
-│   ├── speculative_engine.py             # Zero-recompute speculative decoding engine
-│   ├── cuda_graph_engine.py              # Bucketed CUDA Graph inference runtime
-│   ├── eval_dataset.py                   # WikiText-2, C4, and Code dataset split loaders
-│   ├── dataset.py                        # Tokenizers and sequence batching utilities
-│   ├── alignment.py                      # Centered cosine, Procrustes, and error metrics
-│   └── configs.py                        # Model configurations & depth presets
-├── tests/                    # Unit tests & verification
-│   ├── test_audit_integrity.py           # Mathematical formula and data integrity audit
-│   └── test_kv_continuity.py             # KV cache continuity tests
-├── requirements.txt          # Python dependencies
-├── LICENSE                   # MIT License
+│   ├── canonical_sweeps/            # Verified depth, length (T=4096), and domain sweeps
+│   │   ├── kv_paper/                # Core revision sweeps & Shapley causal swap logs
+│   │   ├── llama3_family/           # Llama-3.2-1B multi-seed runs
+│   │   └── qwen2.5_3b/              # Qwen2.5-3B diagnostic sweeps & speculative logs
+│   ├── figures/                     # Publication figures (PDF & high-res PNG, Figs. 1–7)
+│   ├── kv-cache-continuity-results/ # Track 1 closed-form affine & exit-head baselines
+│   ├── mixed_depth/                 # Track 2A confidence-gated mixed-depth Pareto results
+│   └── river_conditions/            # Track 2B 8-task River-LLM comparative benchmark
+├── src/                             # Core inference models, KV managers & projection layers
+│   ├── configs.py                   # Model configurations & depth presets
+│   ├── eval_dataset.py              # FineWeb-Edu, WikiText-2, C4, GSM8K dataset loaders
+│   ├── exit_adapter.py              # Exit calibration heads & tuned lens modules
+│   └── kv_cache.py                  # Static & native-projected KV cache managers
+├── tests/                           # Unit tests and audit integrity suites
+│   ├── test_audit_integrity.py      # Mathematical formula & data integrity audit
+│   └── test_kv_continuity.py        # KV cache continuity tests
+├── requirements.txt                 # Python dependencies
+├── LICENSE                          # MIT License
 └── README.md
 ```
 
@@ -129,57 +116,32 @@ pip install -r requirements.txt
 ```bash
 python -m unittest discover tests
 ```
-*All 11 audit and mathematical integrity tests should pass with `OK`.*
+*All audit and mathematical integrity tests pass with `OK`.*
 
 ---
 
-## 4. Reproducing Paper Results
+## 4. Reproducing Results
 
-All scripts support execution on a single consumer GPU ($\le 15\text{ GB}$ VRAM, `bfloat16`).
+All 1B and 3B benchmarks execute on a single 15 GiB consumer GPU (`fp16`/`bf16`, peak VRAM $\le 5.86\text{ GiB}$). 7B, 8B, and 14B evaluations run on 24–40 GiB GPUs.
 
-### A. Primary Causal Disentanglement (Table I)
-To evaluate the 3-condition decoupled ablation on `Qwen/Qwen2.5-3B`:
+### A. Primary Causal Disentanglement
 ```bash
 python experiments/isolate_kv_ablation.py \
     --model-id Qwen/Qwen2.5-3B \
     --device cuda
 ```
 
-### B. Mixed-Exit Joint Condition Sweep (Table XI)
+### B. Controlled River-LLM 8-Task Benchmark
 ```bash
-python experiments/run_joint_condition_sweep.py \
-    --model-id Qwen/Qwen2.5-3B \
-    --exit-policy mixed_50 \
+python experiments/run_cheappass_river_conditions.py \
+    --model-name meta-llama/Llama-3.1-8B \
+    --tasks all \
     --device cuda
 ```
 
-### C. 64-Prompt Autoregressive Rollout with Bootstrap CIs (Table XII)
+### C. Confidence-Gated Mixed-Depth Pareto Sweep
 ```bash
-python experiments/run_autoregressive_generation.py \
-    --model-id Qwen/Qwen2.5-3B \
-    --num-samples 64 \
-    --max-new-tokens 32 \
-    --device cuda
-```
-
-### D. Layer-Wise Shapley Causal KV Swap (Table V & VI)
-```bash
-python experiments/run_robust_kv_swap_and_metrics.py \
-    --model-id Qwen/Qwen2.5-3B \
-    --depth 18 \
-    --device cuda
-```
-
-### E. Multi-Seed Shallow Llama-3.2-1B Sweep (Table III)
-```bash
-python experiments/run_multiseed_llama_sweep.py \
-    --model-id meta-llama/Llama-3.2-1B \
-    --device cuda
-```
-
-### F. Context-Length & Domain Scaling (Table IV)
-```bash
-python experiments/run_entropy_domain_comparison.py \
+python experiments/mixed_depth_eval.py \
     --model-id Qwen/Qwen2.5-3B \
     --device cuda
 ```
@@ -188,34 +150,31 @@ python experiments/run_entropy_domain_comparison.py \
 
 ## 5. Canonical Empirical Results
 
-Pre-computed canonical outputs are stored directly in `results/canonical_sweeps/`:
-- `results/canonical_sweeps/kv_paper/revision_table1/standardized_table1_headline.csv`: Core Table I.
-- `results/canonical_sweeps/kv_paper/revision_autoregressive/autoregressive_gen_Qwen_Qwen2.5-3B.csv`: 64-prompt generation rollout tokens.
-- `results/canonical_sweeps/kv_paper/revision_autoregressive/autoregressive_summary_ci_Qwen_Qwen2.5-3B.csv`: Summary metrics with 95% bootstrap confidence intervals.
-- `results/canonical_sweeps/kv_paper/revision_joint_condition/joint_decomposition_mixed_50_zeroshot_Qwen_Qwen2.5-3B.csv`: Table XI mixed-exit decomposition.
-- `results/canonical_sweeps/kv_paper/revision_llama_shallow/llama_multiseed_sweep_meta-llama_Llama-3.2-1B.csv`: Table III shallow Llama sweep.
-- `results/canonical_sweeps/kv_paper/revision_kv_swap_qwen/robust_swap_and_metrics_Qwen_Qwen2.5-3B.csv`: Table V Shapley causal swaps.
+Canonical pre-computed results are tracked in [`results/`](results/):
 
-Publication figures can be viewed in `results/figures/` (available in both vector `.pdf` and high-resolution `.png` formats):
-- `fig1_disentanglement_schematic`: Protocol schematic.
-- `fig2_kl_vs_depth`: KL divergence decay across exit depths.
-- `fig3_key_vs_value_drift`: Key vs. Value cosine similarity & Frobenius error.
-- `fig4_adapter_saturation`: Evaluation perplexity across adapter training budgets.
-- `fig5_cross_architecture`: Multi-seed cross-architecture comparison.
-- `fig6_speculative_benchmark`: Empirical wall-clock speedup vs. theoretical ceiling.
+- **Core Disentanglement**: [`results/canonical_sweeps/kv_paper/revision_table1/standardized_table1_headline.csv`](results/canonical_sweeps/kv_paper/revision_table1/standardized_table1_headline.csv)
+- **Multi-Seed Qwen2.5-3B Sweep**: [`results/canonical_sweeps/qwen2.5_3b/multiseed_depth_sweep.csv`](results/canonical_sweeps/qwen2.5_3b/multiseed_depth_sweep.csv)
+- **Shallow Llama-3.2-1B Sweep**: [`results/canonical_sweeps/kv_paper/revision_llama_shallow/llama_multiseed_sweep_meta-llama_Llama-3.2-1B.csv`](results/canonical_sweeps/kv_paper/revision_llama_shallow/llama_multiseed_sweep_meta-llama_Llama-3.2-1B.csv)
+- **Qwen2.5-7B Depth Sweep**: [`results/canonical_sweeps/kv_paper/revision_7b/large_model_sweep_Qwen_Qwen2.5-7B.csv`](results/canonical_sweeps/kv_paper/revision_7b/large_model_sweep_Qwen_Qwen2.5-7B.csv)
+- **Shapley Causal Swap Attribution**: [`results/canonical_sweeps/kv_paper/revision_kv_swap_qwen/robust_swap_and_metrics_Qwen_Qwen2.5-3B.csv`](results/canonical_sweeps/kv_paper/revision_kv_swap_qwen/robust_swap_and_metrics_Qwen_Qwen2.5-3B.csv)
+- **Closed-Form Affine & Ridge Decomposition**: [`results/kv-cache-continuity-results/baselines_linear/track1_results.json`](results/kv-cache-continuity-results/baselines_linear/track1_results.json)
+- **Mixed-Depth Pareto Benchmark**: [`results/mixed_depth/mixed_depth_results.json`](results/mixed_depth/mixed_depth_results.json)
+- **River-LLM Comparative Benchmark**: [`results/river_conditions/results.json`](results/river_conditions/results.json) & [`results/river_conditions/RIVER_CONDITIONS.md`](results/river_conditions/RIVER_CONDITIONS.md)
+
+Publication figures are located in [`results/figures/`](results/figures/) (in both vector `.pdf` and high-resolution `.png` formats, Figures 1–7).
 
 ---
 
 ## 6. Citation
 
-If you use this protocol, code, or results in your research, please cite:
+If you use this protocol, codebase, or canonical results in your research, please cite:
 
 ```bibtex
-@inproceedings{ahsan2025kvcontinuity,
-  title={Separating Attention Memory from Readout Error in Depth-Adaptive Transformers: Preserving {KV}-Cache Continuity via Native State Projection},
+@inproceedings{ahsan2026kvcontinuity,
+  title={Separating Attention Memory from Readout Error in Depth-Adaptive Transformers: {KV}-Cache Continuity via Native Projection and Affine Repair},
   author={Ahsan, Syed Muhammad Sarim},
   booktitle={IEEE Conference Proceedings},
-  year={2025},
+  year={2026},
   url={https://github.com/sarimahsan/kv-cache-continuity}
 }
 ```

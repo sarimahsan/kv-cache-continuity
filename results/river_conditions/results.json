@@ -1,0 +1,858 @@
+﻿{
+    "models":  {
+                   "meta-llama/Llama-3.2-1B":  {
+                                                   "meta":  {
+                                                                "model":  "meta-llama/Llama-3.2-1B",
+                                                                "num_layers":  16,
+                                                                "hidden_size":  2048,
+                                                                "depths":  [
+                                                                               4,
+                                                                               8,
+                                                                               12
+                                                                           ],
+                                                                "taus":  [
+                                                                             0.5,
+                                                                             0.7
+                                                                         ],
+                                                                "tasks":  [
+                                                                              "gsm8k",
+                                                                              "math",
+                                                                              "humaneval",
+                                                                              "boolq",
+                                                                              "hellaswag",
+                                                                              "arc_c",
+                                                                              "arc_e",
+                                                                              "mmlu"
+                                                                          ],
+                                                                "n_gen_samples":  50,
+                                                                "n_ll_samples":  150,
+                                                                "cost_accounting":  {
+                                                                                        "layer_flops":  121634816.0,
+                                                                                        "layer_bytes_fp16":  121634816.0,
+                                                                                        "cp_r128_flops_per_layer":  786432.0,
+                                                                                        "cp_s3_flops_per_layer":  2048.0,
+                                                                                        "unembed_flops":  525336576.0
+                                                                                    },
+                                                                "timestamp":  "2026-11-04 12:37:42"
+                                                            },
+                                                   "calibration_audit":  {
+                                                                             "E_4":  {
+                                                                                         "h0_top1_pct":  0.0732421875,
+                                                                                         "lens_top1_pct":  31.25,
+                                                                                         "lens_kl":  2.8460415303707123,
+                                                                                         "cp_cos_k":  0.8796111643314362,
+                                                                                         "cp_cos_v":  0.5607500035936633,
+                                                                                         "native_cos_k":  0.7977044607202212,
+                                                                                         "native_cos_v":  0.4812958414355914,
+                                                                                         "dc_cos_k":  -0.04986222250348268,
+                                                                                         "dc_cos_v":  -0.0004643467447446407
+                                                                                     },
+                                                                             "E_8":  {
+                                                                                         "h0_top1_pct":  0.634765625,
+                                                                                         "lens_top1_pct":  36.2548828125,
+                                                                                         "lens_kl":  2.4949063062667847,
+                                                                                         "cp_cos_k":  0.9386779246851802,
+                                                                                         "cp_cos_v":  0.6901929071173072,
+                                                                                         "native_cos_k":  0.8829576149582863,
+                                                                                         "native_cos_v":  0.634512753225863,
+                                                                                         "dc_cos_k":  0.014342542475787923,
+                                                                                         "dc_cos_v":  -0.0010459054819875746
+                                                                                     },
+                                                                             "E_12":  {
+                                                                                          "h0_top1_pct":  12.01171875,
+                                                                                          "lens_top1_pct":  53.80859375,
+                                                                                          "lens_kl":  1.4978656768798828,
+                                                                                          "cp_cos_k":  0.9866754598915577,
+                                                                                          "cp_cos_v":  0.8868474494665861,
+                                                                                          "native_cos_k":  0.9713838994503021,
+                                                                                          "native_cos_v":  0.8574316743761301,
+                                                                                          "dc_cos_k":  0.0404778958454699,
+                                                                                          "dc_cos_v":  0.004425151670147898
+                                                                                      }
+                                                                         },
+                                                   "anchors":  {
+                                                                   "backbone":  {
+                                                                                    "tokens_per_s":  43.78546530381874,
+                                                                                    "std_tokens_per_s":  0.4431267514210848,
+                                                                                    "avg_executed_layers":  16.0,
+                                                                                    "speedup":  1.0,
+                                                                                    "benchmarks":  {
+                                                                                                       "gsm8k":  {
+                                                                                                                     "accuracy":  6.0,
+                                                                                                                     "avg_executed_layers":  16.0,
+                                                                                                                     "n_samples":  50
+                                                                                                                 },
+                                                                                                       "math":  {
+                                                                                                                    "accuracy":  8.0,
+                                                                                                                    "avg_executed_layers":  16.0,
+                                                                                                                    "n_samples":  50
+                                                                                                                },
+                                                                                                       "humaneval":  {
+                                                                                                                         "accuracy":  48.0,
+                                                                                                                         "avg_executed_layers":  16.0,
+                                                                                                                         "n_samples":  50
+                                                                                                                     },
+                                                                                                       "boolq":  {
+                                                                                                                     "accuracy":  64.66666666666666,
+                                                                                                                     "avg_executed_layers":  16.0,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "hellaswag":  {
+                                                                                                                         "accuracy":  49.333333333333336,
+                                                                                                                         "avg_executed_layers":  16.0,
+                                                                                                                         "n_samples":  150
+                                                                                                                     },
+                                                                                                       "arc_c":  {
+                                                                                                                     "accuracy":  36.0,
+                                                                                                                     "avg_executed_layers":  16.0,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "arc_e":  {
+                                                                                                                     "accuracy":  60.0,
+                                                                                                                     "avg_executed_layers":  16.0,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "mmlu":  {
+                                                                                                                    "accuracy":  42.66666666666667,
+                                                                                                                    "avg_executed_layers":  16.0,
+                                                                                                                    "n_samples":  150
+                                                                                                                }
+                                                                                                   }
+                                                                                },
+                                                                   "quant_4bit":  {
+                                                                                      "backend":  "unavailable",
+                                                                                      "note":  "4-bit quantization library not installed (ImportError)",
+                                                                                      "tokens_per_s":  null,
+                                                                                      "speedup":  null
+                                                                                  }
+                                                               },
+                                                   "policy_a":  {
+                                                                    "E_4":  {
+                                                                                "tokens_per_s":  81.1636339963615,
+                                                                                "std_tokens_per_s":  2.036941021117225,
+                                                                                "speedup":  1.8536661294606096,
+                                                                                "avg_executed_layers":  4.0,
+                                                                                "benchmarks":  {
+                                                                                                   "gsm8k":  {
+                                                                                                                 "accuracy":  0.0,
+                                                                                                                 "avg_executed_layers":  4.0,
+                                                                                                                 "n_samples":  50
+                                                                                                             },
+                                                                                                   "math":  {
+                                                                                                                "accuracy":  0.0,
+                                                                                                                "avg_executed_layers":  4.0,
+                                                                                                                "n_samples":  50
+                                                                                                            },
+                                                                                                   "humaneval":  {
+                                                                                                                     "accuracy":  0.0,
+                                                                                                                     "avg_executed_layers":  4.0,
+                                                                                                                     "n_samples":  50
+                                                                                                                 },
+                                                                                                   "boolq":  {
+                                                                                                                 "accuracy":  35.333333333333336,
+                                                                                                                 "avg_executed_layers":  4.0,
+                                                                                                                 "n_samples":  150
+                                                                                                             },
+                                                                                                   "hellaswag":  {
+                                                                                                                     "accuracy":  41.333333333333336,
+                                                                                                                     "avg_executed_layers":  4.0,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                   "arc_c":  {
+                                                                                                                 "accuracy":  26.666666666666668,
+                                                                                                                 "avg_executed_layers":  4.0,
+                                                                                                                 "n_samples":  150
+                                                                                                             },
+                                                                                                   "arc_e":  {
+                                                                                                                 "accuracy":  35.333333333333336,
+                                                                                                                 "avg_executed_layers":  4.0,
+                                                                                                                 "n_samples":  150
+                                                                                                             },
+                                                                                                   "mmlu":  {
+                                                                                                                "accuracy":  21.333333333333336,
+                                                                                                                "avg_executed_layers":  4.0,
+                                                                                                                "n_samples":  150
+                                                                                                            }
+                                                                                               }
+                                                                            },
+                                                                    "E_8":  {
+                                                                                "tokens_per_s":  65.40232770239979,
+                                                                                "std_tokens_per_s":  0.8747040662526648,
+                                                                                "speedup":  1.4936995016173948,
+                                                                                "avg_executed_layers":  8.0,
+                                                                                "benchmarks":  {
+                                                                                                   "gsm8k":  {
+                                                                                                                 "accuracy":  2.0,
+                                                                                                                 "avg_executed_layers":  8.0,
+                                                                                                                 "n_samples":  50
+                                                                                                             },
+                                                                                                   "math":  {
+                                                                                                                "accuracy":  0.0,
+                                                                                                                "avg_executed_layers":  8.0,
+                                                                                                                "n_samples":  50
+                                                                                                            },
+                                                                                                   "humaneval":  {
+                                                                                                                     "accuracy":  0.0,
+                                                                                                                     "avg_executed_layers":  8.0,
+                                                                                                                     "n_samples":  50
+                                                                                                                 },
+                                                                                                   "boolq":  {
+                                                                                                                 "accuracy":  37.333333333333336,
+                                                                                                                 "avg_executed_layers":  8.0,
+                                                                                                                 "n_samples":  150
+                                                                                                             },
+                                                                                                   "hellaswag":  {
+                                                                                                                     "accuracy":  43.333333333333336,
+                                                                                                                     "avg_executed_layers":  8.0,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                   "arc_c":  {
+                                                                                                                 "accuracy":  30.666666666666664,
+                                                                                                                 "avg_executed_layers":  8.0,
+                                                                                                                 "n_samples":  150
+                                                                                                             },
+                                                                                                   "arc_e":  {
+                                                                                                                 "accuracy":  40.0,
+                                                                                                                 "avg_executed_layers":  8.0,
+                                                                                                                 "n_samples":  150
+                                                                                                             },
+                                                                                                   "mmlu":  {
+                                                                                                                "accuracy":  28.000000000000004,
+                                                                                                                "avg_executed_layers":  8.0,
+                                                                                                                "n_samples":  150
+                                                                                                            }
+                                                                                               }
+                                                                            },
+                                                                    "E_12":  {
+                                                                                 "tokens_per_s":  53.81121338027375,
+                                                                                 "std_tokens_per_s":  0.6919777635453594,
+                                                                                 "speedup":  1.2289743412999796,
+                                                                                 "avg_executed_layers":  12.0,
+                                                                                 "benchmarks":  {
+                                                                                                    "gsm8k":  {
+                                                                                                                  "accuracy":  0.0,
+                                                                                                                  "avg_executed_layers":  12.0,
+                                                                                                                  "n_samples":  50
+                                                                                                              },
+                                                                                                    "math":  {
+                                                                                                                 "accuracy":  0.0,
+                                                                                                                 "avg_executed_layers":  12.0,
+                                                                                                                 "n_samples":  50
+                                                                                                             },
+                                                                                                    "humaneval":  {
+                                                                                                                      "accuracy":  0.0,
+                                                                                                                      "avg_executed_layers":  12.0,
+                                                                                                                      "n_samples":  50
+                                                                                                                  },
+                                                                                                    "boolq":  {
+                                                                                                                  "accuracy":  66.0,
+                                                                                                                  "avg_executed_layers":  12.0,
+                                                                                                                  "n_samples":  150
+                                                                                                              },
+                                                                                                    "hellaswag":  {
+                                                                                                                      "accuracy":  43.333333333333336,
+                                                                                                                      "avg_executed_layers":  12.0,
+                                                                                                                      "n_samples":  150
+                                                                                                                  },
+                                                                                                    "arc_c":  {
+                                                                                                                  "accuracy":  32.0,
+                                                                                                                  "avg_executed_layers":  12.0,
+                                                                                                                  "n_samples":  150
+                                                                                                              },
+                                                                                                    "arc_e":  {
+                                                                                                                  "accuracy":  48.66666666666667,
+                                                                                                                  "avg_executed_layers":  12.0,
+                                                                                                                  "n_samples":  150
+                                                                                                              },
+                                                                                                    "mmlu":  {
+                                                                                                                 "accuracy":  36.0,
+                                                                                                                 "avg_executed_layers":  12.0,
+                                                                                                                 "n_samples":  150
+                                                                                                             }
+                                                                                                }
+                                                                             }
+                                                                },
+                                                   "policy_b":  {
+                                                                    "tau_0.5":  {
+                                                                                    "tokens_per_s":  44.006838084475234,
+                                                                                    "std_tokens_per_s":  1.817132017822084,
+                                                                                    "speedup":  1.005055850819911,
+                                                                                    "avg_executed_layers":  14.335195070497056,
+                                                                                    "benchmarks":  {
+                                                                                                       "gsm8k":  {
+                                                                                                                     "accuracy":  0.0,
+                                                                                                                     "avg_executed_layers":  14.530776843561576,
+                                                                                                                     "n_samples":  50
+                                                                                                                 },
+                                                                                                       "math":  {
+                                                                                                                    "accuracy":  2.0,
+                                                                                                                    "avg_executed_layers":  13.134853218210361,
+                                                                                                                    "n_samples":  50
+                                                                                                                },
+                                                                                                       "humaneval":  {
+                                                                                                                         "accuracy":  38.0,
+                                                                                                                         "avg_executed_layers":  15.420811709882571,
+                                                                                                                         "n_samples":  50
+                                                                                                                     },
+                                                                                                       "boolq":  {
+                                                                                                                     "accuracy":  62.0,
+                                                                                                                     "avg_executed_layers":  14.446196559270224,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "hellaswag":  {
+                                                                                                                         "accuracy":  42.0,
+                                                                                                                         "avg_executed_layers":  13.485994048118592,
+                                                                                                                         "n_samples":  150
+                                                                                                                     },
+                                                                                                       "arc_c":  {
+                                                                                                                     "accuracy":  37.333333333333336,
+                                                                                                                     "avg_executed_layers":  14.452910436524283,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "arc_e":  {
+                                                                                                                     "accuracy":  52.666666666666664,
+                                                                                                                     "avg_executed_layers":  14.418895197444494,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "mmlu":  {
+                                                                                                                    "accuracy":  35.333333333333336,
+                                                                                                                    "avg_executed_layers":  14.791122550964355,
+                                                                                                                    "n_samples":  150
+                                                                                                                }
+                                                                                                   }
+                                                                                },
+                                                                    "tau_0.7":  {
+                                                                                    "tokens_per_s":  42.234725206996,
+                                                                                    "std_tokens_per_s":  0.1829151488448575,
+                                                                                    "speedup":  0.9645832221705889,
+                                                                                    "avg_executed_layers":  15.823590003384485,
+                                                                                    "benchmarks":  {
+                                                                                                       "gsm8k":  {
+                                                                                                                     "accuracy":  6.0,
+                                                                                                                     "avg_executed_layers":  16.0,
+                                                                                                                     "n_samples":  50
+                                                                                                                 },
+                                                                                                       "math":  {
+                                                                                                                    "accuracy":  8.0,
+                                                                                                                    "avg_executed_layers":  16.0,
+                                                                                                                    "n_samples":  50
+                                                                                                                },
+                                                                                                       "humaneval":  {
+                                                                                                                         "accuracy":  48.0,
+                                                                                                                         "avg_executed_layers":  16.0,
+                                                                                                                         "n_samples":  50
+                                                                                                                     },
+                                                                                                       "boolq":  {
+                                                                                                                     "accuracy":  62.66666666666667,
+                                                                                                                     "avg_executed_layers":  15.896258589426676,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "hellaswag":  {
+                                                                                                                         "accuracy":  48.0,
+                                                                                                                         "avg_executed_layers":  15.669501293500264,
+                                                                                                                         "n_samples":  150
+                                                                                                                     },
+                                                                                                       "arc_c":  {
+                                                                                                                     "accuracy":  33.33333333333333,
+                                                                                                                     "avg_executed_layers":  15.613408082326254,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "arc_e":  {
+                                                                                                                     "accuracy":  46.666666666666664,
+                                                                                                                     "avg_executed_layers":  15.574372008111741,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "mmlu":  {
+                                                                                                                    "accuracy":  35.333333333333336,
+                                                                                                                    "avg_executed_layers":  15.835180053710937,
+                                                                                                                    "n_samples":  150
+                                                                                                                }
+                                                                                                   }
+                                                                                }
+                                                                },
+                                                   "controls":  {
+                                                                    "DirectCopy_E8":  {
+                                                                                          "tokens_per_s":  74.501357630105,
+                                                                                          "speedup":  1.7015088708811184,
+                                                                                          "avg_executed_layers":  8.0,
+                                                                                          "benchmarks":  {
+                                                                                                             "gsm8k":  {
+                                                                                                                           "accuracy":  2.0,
+                                                                                                                           "avg_executed_layers":  8.0,
+                                                                                                                           "n_samples":  50
+                                                                                                                       },
+                                                                                                             "boolq":  {
+                                                                                                                           "accuracy":  38.0,
+                                                                                                                           "avg_executed_layers":  8.0,
+                                                                                                                           "n_samples":  150
+                                                                                                                       },
+                                                                                                             "arc_c":  {
+                                                                                                                           "accuracy":  24.0,
+                                                                                                                           "avg_executed_layers":  8.0,
+                                                                                                                           "n_samples":  150
+                                                                                                                       },
+                                                                                                             "mmlu":  {
+                                                                                                                          "accuracy":  20.666666666666668,
+                                                                                                                          "avg_executed_layers":  8.0,
+                                                                                                                          "n_samples":  150
+                                                                                                                      }
+                                                                                                         }
+                                                                                      },
+                                                                    "Native_E8":  {
+                                                                                      "tokens_per_s":  67.7974099050511,
+                                                                                      "speedup":  1.548399895595906,
+                                                                                      "avg_executed_layers":  8.0,
+                                                                                      "benchmarks":  {
+                                                                                                         "gsm8k":  {
+                                                                                                                       "accuracy":  2.0,
+                                                                                                                       "avg_executed_layers":  8.0,
+                                                                                                                       "n_samples":  50
+                                                                                                                   },
+                                                                                                         "boolq":  {
+                                                                                                                       "accuracy":  35.333333333333336,
+                                                                                                                       "avg_executed_layers":  8.0,
+                                                                                                                       "n_samples":  150
+                                                                                                                   },
+                                                                                                         "arc_c":  {
+                                                                                                                       "accuracy":  30.0,
+                                                                                                                       "avg_executed_layers":  8.0,
+                                                                                                                       "n_samples":  150
+                                                                                                                   },
+                                                                                                         "mmlu":  {
+                                                                                                                      "accuracy":  27.333333333333332,
+                                                                                                                      "avg_executed_layers":  8.0,
+                                                                                                                      "n_samples":  150
+                                                                                                                  }
+                                                                                                     }
+                                                                                  }
+                                                                }
+                                               },
+                   "meta-llama/Llama-3.1-8B":  {
+                                                   "meta":  {
+                                                                "model":  "meta-llama/Llama-3.1-8B",
+                                                                "num_layers":  32,
+                                                                "hidden_size":  4096,
+                                                                "depths":  [
+                                                                               8,
+                                                                               16,
+                                                                               24
+                                                                           ],
+                                                                "taus":  [
+                                                                             0.5,
+                                                                             0.7
+                                                                         ],
+                                                                "tasks":  [
+                                                                              "gsm8k",
+                                                                              "math",
+                                                                              "humaneval",
+                                                                              "boolq",
+                                                                              "hellaswag",
+                                                                              "arc_c",
+                                                                              "arc_e",
+                                                                              "mmlu"
+                                                                          ],
+                                                                "n_gen_samples":  50,
+                                                                "n_ll_samples":  150,
+                                                                "cost_accounting":  {
+                                                                                        "layer_flops":  436207616.0,
+                                                                                        "layer_bytes_fp16":  436207616.0,
+                                                                                        "cp_r128_flops_per_layer":  1572864.0,
+                                                                                        "cp_s3_flops_per_layer":  4096.0,
+                                                                                        "unembed_flops":  1050673152.0
+                                                                                    },
+                                                                "timestamp":  "2026-11-04 13:54:42"
+                                                            },
+                                                   "calibration_audit":  {
+                                                                             "E_8":  {
+                                                                                         "h0_top1_pct":  0.3662109375,
+                                                                                         "lens_top1_pct":  27.001953125,
+                                                                                         "lens_kl":  4.442520499229431,
+                                                                                         "cp_cos_k":  0.8892664831752578,
+                                                                                         "cp_cos_v":  0.5161876805747548,
+                                                                                         "native_cos_k":  0.8356064260005951,
+                                                                                         "native_cos_v":  0.45805437327362597,
+                                                                                         "dc_cos_k":  0.003051877564833679,
+                                                                                         "dc_cos_v":  -0.0009015638105059528
+                                                                                     },
+                                                                             "E_16":  {
+                                                                                          "h0_top1_pct":  3.271484375,
+                                                                                          "lens_top1_pct":  32.2021484375,
+                                                                                          "lens_kl":  3.9717671871185303,
+                                                                                          "cp_cos_k":  0.9253776022233069,
+                                                                                          "cp_cos_v":  0.6448253286071122,
+                                                                                          "native_cos_k":  0.8673645206727087,
+                                                                                          "native_cos_v":  0.6052970378659666,
+                                                                                          "dc_cos_k":  5.6730264077486936E-05,
+                                                                                          "dc_cos_v":  -0.0001197415084561726
+                                                                                      },
+                                                                             "E_24":  {
+                                                                                          "h0_top1_pct":  24.8291015625,
+                                                                                          "lens_top1_pct":  42.236328125,
+                                                                                          "lens_kl":  3.305903911590576,
+                                                                                          "cp_cos_k":  0.9610919142141938,
+                                                                                          "cp_cos_v":  0.8350801691412926,
+                                                                                          "native_cos_k":  0.9053568728268147,
+                                                                                          "native_cos_v":  0.806061515584588,
+                                                                                          "dc_cos_k":  -0.007875741986936191,
+                                                                                          "dc_cos_v":  0.004505567405885813
+                                                                                      }
+                                                                         },
+                                                   "anchors":  {
+                                                                   "backbone":  {
+                                                                                    "tokens_per_s":  23.406075868820064,
+                                                                                    "std_tokens_per_s":  0.21059547790420766,
+                                                                                    "avg_executed_layers":  32.0,
+                                                                                    "speedup":  1.0,
+                                                                                    "benchmarks":  {
+                                                                                                       "gsm8k":  {
+                                                                                                                     "accuracy":  50.0,
+                                                                                                                     "avg_executed_layers":  32.0,
+                                                                                                                     "n_samples":  50
+                                                                                                                 },
+                                                                                                       "math":  {
+                                                                                                                    "accuracy":  16.0,
+                                                                                                                    "avg_executed_layers":  32.0,
+                                                                                                                    "n_samples":  50
+                                                                                                                },
+                                                                                                       "humaneval":  {
+                                                                                                                         "accuracy":  64.0,
+                                                                                                                         "avg_executed_layers":  32.0,
+                                                                                                                         "n_samples":  50
+                                                                                                                     },
+                                                                                                       "boolq":  {
+                                                                                                                     "accuracy":  82.0,
+                                                                                                                     "avg_executed_layers":  32.0,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "hellaswag":  {
+                                                                                                                         "accuracy":  63.33333333333333,
+                                                                                                                         "avg_executed_layers":  32.0,
+                                                                                                                         "n_samples":  150
+                                                                                                                     },
+                                                                                                       "arc_c":  {
+                                                                                                                     "accuracy":  57.333333333333336,
+                                                                                                                     "avg_executed_layers":  32.0,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "arc_e":  {
+                                                                                                                     "accuracy":  78.66666666666666,
+                                                                                                                     "avg_executed_layers":  32.0,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "mmlu":  {
+                                                                                                                    "accuracy":  64.66666666666666,
+                                                                                                                    "avg_executed_layers":  32.0,
+                                                                                                                    "n_samples":  150
+                                                                                                                }
+                                                                                                   }
+                                                                                },
+                                                                   "quant_4bit":  {
+                                                                                      "backend":  "unavailable",
+                                                                                      "note":  "4-bit quantization library not installed (ImportError)",
+                                                                                      "tokens_per_s":  null,
+                                                                                      "speedup":  null
+                                                                                  }
+                                                               },
+                                                   "policy_a":  {
+                                                                    "E_8":  {
+                                                                                "tokens_per_s":  42.45194578116002,
+                                                                                "std_tokens_per_s":  0.440374248581213,
+                                                                                "speedup":  1.8137147815414685,
+                                                                                "avg_executed_layers":  8.0,
+                                                                                "benchmarks":  {
+                                                                                                   "gsm8k":  {
+                                                                                                                 "accuracy":  2.0,
+                                                                                                                 "avg_executed_layers":  8.0,
+                                                                                                                 "n_samples":  50
+                                                                                                             },
+                                                                                                   "math":  {
+                                                                                                                "accuracy":  0.0,
+                                                                                                                "avg_executed_layers":  8.0,
+                                                                                                                "n_samples":  50
+                                                                                                            },
+                                                                                                   "humaneval":  {
+                                                                                                                     "accuracy":  0.0,
+                                                                                                                     "avg_executed_layers":  8.0,
+                                                                                                                     "n_samples":  50
+                                                                                                                 },
+                                                                                                   "boolq":  {
+                                                                                                                 "accuracy":  35.333333333333336,
+                                                                                                                 "avg_executed_layers":  8.0,
+                                                                                                                 "n_samples":  150
+                                                                                                             },
+                                                                                                   "hellaswag":  {
+                                                                                                                     "accuracy":  48.0,
+                                                                                                                     "avg_executed_layers":  8.0,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                   "arc_c":  {
+                                                                                                                 "accuracy":  38.666666666666664,
+                                                                                                                 "avg_executed_layers":  8.0,
+                                                                                                                 "n_samples":  150
+                                                                                                             },
+                                                                                                   "arc_e":  {
+                                                                                                                 "accuracy":  44.666666666666664,
+                                                                                                                 "avg_executed_layers":  8.0,
+                                                                                                                 "n_samples":  150
+                                                                                                             },
+                                                                                                   "mmlu":  {
+                                                                                                                "accuracy":  21.333333333333336,
+                                                                                                                "avg_executed_layers":  8.0,
+                                                                                                                "n_samples":  150
+                                                                                                            }
+                                                                                               }
+                                                                            },
+                                                                    "E_16":  {
+                                                                                 "tokens_per_s":  33.44268633905206,
+                                                                                 "std_tokens_per_s":  0.2509516876816012,
+                                                                                 "speedup":  1.4288036374180118,
+                                                                                 "avg_executed_layers":  16.0,
+                                                                                 "benchmarks":  {
+                                                                                                    "gsm8k":  {
+                                                                                                                  "accuracy":  0.0,
+                                                                                                                  "avg_executed_layers":  16.0,
+                                                                                                                  "n_samples":  50
+                                                                                                              },
+                                                                                                    "math":  {
+                                                                                                                 "accuracy":  0.0,
+                                                                                                                 "avg_executed_layers":  16.0,
+                                                                                                                 "n_samples":  50
+                                                                                                             },
+                                                                                                    "humaneval":  {
+                                                                                                                      "accuracy":  0.0,
+                                                                                                                      "avg_executed_layers":  16.0,
+                                                                                                                      "n_samples":  50
+                                                                                                                  },
+                                                                                                    "boolq":  {
+                                                                                                                  "accuracy":  36.666666666666664,
+                                                                                                                  "avg_executed_layers":  16.0,
+                                                                                                                  "n_samples":  150
+                                                                                                              },
+                                                                                                    "hellaswag":  {
+                                                                                                                      "accuracy":  47.333333333333336,
+                                                                                                                      "avg_executed_layers":  16.0,
+                                                                                                                      "n_samples":  150
+                                                                                                                  },
+                                                                                                    "arc_c":  {
+                                                                                                                  "accuracy":  43.333333333333336,
+                                                                                                                  "avg_executed_layers":  16.0,
+                                                                                                                  "n_samples":  150
+                                                                                                              },
+                                                                                                    "arc_e":  {
+                                                                                                                  "accuracy":  47.333333333333336,
+                                                                                                                  "avg_executed_layers":  16.0,
+                                                                                                                  "n_samples":  150
+                                                                                                              },
+                                                                                                    "mmlu":  {
+                                                                                                                 "accuracy":  50.66666666666667,
+                                                                                                                 "avg_executed_layers":  16.0,
+                                                                                                                 "n_samples":  150
+                                                                                                             }
+                                                                                                }
+                                                                             },
+                                                                    "E_24":  {
+                                                                                 "tokens_per_s":  27.94130532041229,
+                                                                                 "std_tokens_per_s":  0.363649404916564,
+                                                                                 "speedup":  1.1937629133994965,
+                                                                                 "avg_executed_layers":  24.0,
+                                                                                 "benchmarks":  {
+                                                                                                    "gsm8k":  {
+                                                                                                                  "accuracy":  2.0,
+                                                                                                                  "avg_executed_layers":  24.0,
+                                                                                                                  "n_samples":  50
+                                                                                                              },
+                                                                                                    "math":  {
+                                                                                                                 "accuracy":  0.0,
+                                                                                                                 "avg_executed_layers":  24.0,
+                                                                                                                 "n_samples":  50
+                                                                                                             },
+                                                                                                    "humaneval":  {
+                                                                                                                      "accuracy":  0.0,
+                                                                                                                      "avg_executed_layers":  24.0,
+                                                                                                                      "n_samples":  50
+                                                                                                                  },
+                                                                                                    "boolq":  {
+                                                                                                                  "accuracy":  46.666666666666664,
+                                                                                                                  "avg_executed_layers":  24.0,
+                                                                                                                  "n_samples":  150
+                                                                                                              },
+                                                                                                    "hellaswag":  {
+                                                                                                                      "accuracy":  46.0,
+                                                                                                                      "avg_executed_layers":  24.0,
+                                                                                                                      "n_samples":  150
+                                                                                                                  },
+                                                                                                    "arc_c":  {
+                                                                                                                  "accuracy":  41.333333333333336,
+                                                                                                                  "avg_executed_layers":  24.0,
+                                                                                                                  "n_samples":  150
+                                                                                                              },
+                                                                                                    "arc_e":  {
+                                                                                                                  "accuracy":  53.333333333333336,
+                                                                                                                  "avg_executed_layers":  24.0,
+                                                                                                                  "n_samples":  150
+                                                                                                              },
+                                                                                                    "mmlu":  {
+                                                                                                                 "accuracy":  60.66666666666667,
+                                                                                                                 "avg_executed_layers":  24.0,
+                                                                                                                 "n_samples":  150
+                                                                                                             }
+                                                                                                }
+                                                                             }
+                                                                },
+                                                   "policy_b":  {
+                                                                    "tau_0.5":  {
+                                                                                    "tokens_per_s":  27.720615797698002,
+                                                                                    "std_tokens_per_s":  0.6371008882077439,
+                                                                                    "speedup":  1.184334185408049,
+                                                                                    "avg_executed_layers":  22.654226309838613,
+                                                                                    "benchmarks":  {
+                                                                                                       "gsm8k":  {
+                                                                                                                     "accuracy":  0.0,
+                                                                                                                     "avg_executed_layers":  24.017,
+                                                                                                                     "n_samples":  50
+                                                                                                                 },
+                                                                                                       "math":  {
+                                                                                                                    "accuracy":  0.0,
+                                                                                                                    "avg_executed_layers":  23.990767676767675,
+                                                                                                                    "n_samples":  50
+                                                                                                                },
+                                                                                                       "humaneval":  {
+                                                                                                                         "accuracy":  0.0,
+                                                                                                                         "avg_executed_layers":  23.904464216634434,
+                                                                                                                         "n_samples":  50
+                                                                                                                     },
+                                                                                                       "boolq":  {
+                                                                                                                     "accuracy":  42.66666666666667,
+                                                                                                                     "avg_executed_layers":  21.72777811050415,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "hellaswag":  {
+                                                                                                                         "accuracy":  43.333333333333336,
+                                                                                                                         "avg_executed_layers":  20.73277134577433,
+                                                                                                                         "n_samples":  150
+                                                                                                                     },
+                                                                                                       "arc_c":  {
+                                                                                                                     "accuracy":  38.0,
+                                                                                                                     "avg_executed_layers":  22.095785852008397,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "arc_e":  {
+                                                                                                                     "accuracy":  51.33333333333333,
+                                                                                                                     "avg_executed_layers":  21.95306610213386,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "mmlu":  {
+                                                                                                                    "accuracy":  62.0,
+                                                                                                                    "avg_executed_layers":  22.812177174886067,
+                                                                                                                    "n_samples":  150
+                                                                                                                }
+                                                                                                   }
+                                                                                },
+                                                                    "tau_0.7":  {
+                                                                                    "tokens_per_s":  25.6173621204303,
+                                                                                    "std_tokens_per_s":  0.8568349337844419,
+                                                                                    "speedup":  1.0944748818214316,
+                                                                                    "avg_executed_layers":  26.452429231740183,
+                                                                                    "benchmarks":  {
+                                                                                                       "gsm8k":  {
+                                                                                                                     "accuracy":  8.0,
+                                                                                                                     "avg_executed_layers":  25.101599999999998,
+                                                                                                                     "n_samples":  50
+                                                                                                                 },
+                                                                                                       "math":  {
+                                                                                                                    "accuracy":  4.0,
+                                                                                                                    "avg_executed_layers":  25.826737373737373,
+                                                                                                                    "n_samples":  50
+                                                                                                                },
+                                                                                                       "humaneval":  {
+                                                                                                                         "accuracy":  2.0,
+                                                                                                                         "avg_executed_layers":  24.478817497385847,
+                                                                                                                         "n_samples":  50
+                                                                                                                     },
+                                                                                                       "boolq":  {
+                                                                                                                     "accuracy":  44.666666666666664,
+                                                                                                                     "avg_executed_layers":  28.281280066172283,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "hellaswag":  {
+                                                                                                                         "accuracy":  44.666666666666664,
+                                                                                                                         "avg_executed_layers":  25.131067841847738,
+                                                                                                                         "n_samples":  150
+                                                                                                                     },
+                                                                                                       "arc_c":  {
+                                                                                                                     "accuracy":  37.333333333333336,
+                                                                                                                     "avg_executed_layers":  27.35070350752936,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "arc_e":  {
+                                                                                                                     "accuracy":  64.66666666666666,
+                                                                                                                     "avg_executed_layers":  27.534650998645358,
+                                                                                                                     "n_samples":  150
+                                                                                                                 },
+                                                                                                       "mmlu":  {
+                                                                                                                    "accuracy":  61.33333333333333,
+                                                                                                                    "avg_executed_layers":  27.914576568603515,
+                                                                                                                    "n_samples":  150
+                                                                                                                }
+                                                                                                   }
+                                                                                }
+                                                                },
+                                                   "controls":  {
+                                                                    "DirectCopy_E16":  {
+                                                                                           "tokens_per_s":  43.93747530469753,
+                                                                                           "speedup":  1.8771824696692518,
+                                                                                           "avg_executed_layers":  16.0,
+                                                                                           "benchmarks":  {
+                                                                                                              "gsm8k":  {
+                                                                                                                            "accuracy":  0.0,
+                                                                                                                            "avg_executed_layers":  16.0,
+                                                                                                                            "n_samples":  50
+                                                                                                                        },
+                                                                                                              "boolq":  {
+                                                                                                                            "accuracy":  35.333333333333336,
+                                                                                                                            "avg_executed_layers":  16.0,
+                                                                                                                            "n_samples":  150
+                                                                                                                        },
+                                                                                                              "arc_c":  {
+                                                                                                                            "accuracy":  38.666666666666664,
+                                                                                                                            "avg_executed_layers":  16.0,
+                                                                                                                            "n_samples":  150
+                                                                                                                        },
+                                                                                                              "mmlu":  {
+                                                                                                                           "accuracy":  22.666666666666664,
+                                                                                                                           "avg_executed_layers":  16.0,
+                                                                                                                           "n_samples":  150
+                                                                                                                       }
+                                                                                                          }
+                                                                                       },
+                                                                    "Native_E16":  {
+                                                                                       "tokens_per_s":  35.31198621668675,
+                                                                                       "speedup":  1.508667510717886,
+                                                                                       "avg_executed_layers":  16.0,
+                                                                                       "benchmarks":  {
+                                                                                                          "gsm8k":  {
+                                                                                                                        "accuracy":  0.0,
+                                                                                                                        "avg_executed_layers":  16.0,
+                                                                                                                        "n_samples":  50
+                                                                                                                    },
+                                                                                                          "boolq":  {
+                                                                                                                        "accuracy":  35.333333333333336,
+                                                                                                                        "avg_executed_layers":  16.0,
+                                                                                                                        "n_samples":  150
+                                                                                                                    },
+                                                                                                          "arc_c":  {
+                                                                                                                        "accuracy":  50.0,
+                                                                                                                        "avg_executed_layers":  16.0,
+                                                                                                                        "n_samples":  150
+                                                                                                                    },
+                                                                                                          "mmlu":  {
+                                                                                                                       "accuracy":  48.66666666666667,
+                                                                                                                       "avg_executed_layers":  16.0,
+                                                                                                                       "n_samples":  150
+                                                                                                                   }
+                                                                                                      }
+                                                                                   }
+                                                                }
+                                               }
+               }
+}

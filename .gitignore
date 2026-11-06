@@ -25,13 +25,19 @@ env/
 Thumbs.db
 desktop.ini
 
-# Manuscript folder (keep local, do not push)
+# Manuscript folder and paper source (keep local, do not push)
 manuscript/
+kv_paper_source/
+*.tex
+*.bib
 
-# Local scripts with tokens
+# Internal author notes, explanations, and development workbooks
+doc/archive/
+doc/internal_notes/
+
+# Local scripts with tokens or developer scrapers
 r.py
 check_traffic.py
-
 
 # Model checkpoints & large weights
 *.pt
@@ -48,26 +54,31 @@ vkr_out_checkpoints/
 cheap_pass_out/
 cheap_pass_checkpoints/
 vkr3_out_different_ranks/
-New folder/
+"New folder"/
 
-# Experiment results & outputs
-results/
-results/*
-kv-cache-continuity-results/
-cheap_pass_results*.json
+# Archived runs and redundant intermediate directories
+results/archive/
+results/canonical_sweeps/graph_quality/
+results/canonical_sweeps/joint_condition/
+results/canonical_sweeps/autoregressive_generation/
+results/canonical_sweeps/qwen2.5_3b/experiment_8_tuned_lens*
+results/canonical_sweeps/qwen2.5_3b/tuned_lens*
+results/canonical_sweeps/kv_paper/speculative_track/experiment_8_tuned_lens*
+
+# Loose / intermediate scratch output files in root
 ood_results.json
 ood_results.md
 battery_results.json
 rollout_results.json
-*results*.json
+results (1).json
+results_*.json
+cheap_pass_results*.json
 
 # Training logs & tracking
 runs/
 wandb/
 tensorboard/
 *.log
-vkr3_out_different_ranks/
-
 
 # LaTeX build artifacts & temporary files
 *.aux
